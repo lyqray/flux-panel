@@ -11,6 +11,8 @@ on:
       - 'go-gost/**'
       - 'android-app/**'
       - '.github/workflows/docker-build.yml'
+  # 支持手动触发 Action
+  workflow_dispatch:
 
 jobs:
   build-gost:
@@ -133,7 +135,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --push \
-            -t bqlpfy/vite-frontend \
+            -t lyqray/vite-frontend \
             ./vite-frontend
 
   build-java:
@@ -188,5 +190,5 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --push \
-            -t bqlpfy/springboot-backend \
+            -t lyqray/springboot-backend \
             ./springboot-backend
