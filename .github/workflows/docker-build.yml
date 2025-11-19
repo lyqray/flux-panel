@@ -9,6 +9,8 @@ on:
     branches:
       - main
       - beta
+  # 支持手动触发 Action
+  workflow_dispatch:
 
 jobs:
   check-version:
@@ -130,8 +132,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t bqlpfy/vite-frontend:latest \
-            -t bqlpfy/vite-frontend:${VERSION} \
+            -t lyqray/vite-frontend:latest \
+            -t lyqray/vite-frontend:${VERSION} \
             ./vite-frontend
 
   build-java:
@@ -174,8 +176,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t bqlpfy/springboot-backend:latest \
-            -t bqlpfy/springboot-backend:${VERSION} \
+            -t lyqray/springboot-backend:latest \
+            -t lyqray/springboot-backend:${VERSION} \
             ./springboot-backend
 
   create-release:
@@ -234,8 +236,8 @@ jobs:
           ## 📦 Components
           - **GOST Binary AMD64** - \`gost-amd64\` (Linux x86_64, compressed with UPX)
           - **GOST Binary ARM64** - \`gost-arm64\` (Linux ARM64/aarch64, compressed with UPX)
-          - **Vite Frontend** Docker Image: \`bqlpfy/vite-frontend:${VERSION}\` / \`bqlpfy/vite-frontend:latest\` (支持 AMD64/ARM64)
-          - **Spring Boot Backend** Docker Image: \`bqlpfy/springboot-backend:${VERSION}\` / \`bqlpfy/springboot-backend:latest\` (支持 AMD64/ARM64)
+          - **Vite Frontend** Docker Image: \`lyqray/vite-frontend:${VERSION}\` / \`lyqray/vite-frontend:latest\` (支持 AMD64/ARM64)
+          - **Spring Boot Backend** Docker Image: \`lyqray/springboot-backend:${VERSION}\` / \`lyqray/springboot-backend:latest\` (支持 AMD64/ARM64)
           
           ## 📥 Installation Files
           - \`install.sh\` - GOST 客户端安装脚本
