@@ -8,8 +8,8 @@ export LC_ALL=C
 
 
 # 全局下载地址配置
-DOCKER_COMPOSEV4_URL="https://github.com/bqlpfy/flux-panel/releases/download/2.0.2-beta/docker-compose-v4.yml"
-DOCKER_COMPOSEV6_URL="https://github.com/bqlpfy/flux-panel/releases/download/2.0.2-beta/docker-compose-v6.yml"
+DOCKER_COMPOSEV4_URL="https://github.com/lyqray/flux-panel/releases/download/2.0.2-beta/docker-compose-v4.yml"
+DOCKER_COMPOSEV6_URL="https://github.com/lyqray/flux-panel/releases/download/2.0.2-beta/docker-compose-v6.yml"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
@@ -147,7 +147,8 @@ show_menu() {
   echo "1. 安装面板"
   echo "2. 更新面板"
   echo "3. 卸载面板"
-  echo "4. 退出"
+  echo "4. 导出备份"
+  echo "5. 退出"
   echo "==============================================="
 }
 
@@ -282,6 +283,63 @@ update_panel() {
 
 
 
+
+# 导出数据库备份
+export_migration_sql() {
+  echo "📄 开始导出 SQLite 数据库备份..."
+
+  # 检查后端容器是否运行
+  if ! docker ps --format "{{.Names}}" | grep -q "^springboot-backend$"; then
+    echo "❌ 后端容器未运行，无法备份数据库"
+    echo "🔍 当前运行的容器："
+    docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+    return 1
+  fi
+
+  # 检查数据库文件是否存在
+  if ! docker exec springboot-backend ls /app/data/gost.db > /dev/null 2>&1; then
+    echo "❌ 数据库文件 /app/data/gost.db 不存在"
+    return 1
+  fi
+
+  # 生成备份文件名
+  BACKUP_FILE="gost_backup_$(date +%Y%m%d_%H%M%S).db"
+  
+  echo "⏳ 正在备份数据库..."
+  
+  # 使用 docker cp 命令复制数据库文件
+  if docker cp springboot-backend:/app/data/gost.db "./$BACKUP_FILE"; then
+    echo "✅ 数据库备份成功"
+    
+    # 检查文件大小
+    if [[ -f "$BACKUP_FILE" ]] && [[ -s "$BACKUP_FILE" ]]; then
+      FILE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+      echo "📁 文件位置: $(pwd)/$BACKUP_FILE"
+      echo "📊 文件大小: $FILE_SIZE"
+      
+      # 验证 SQLite 文件完整性（可选）
+      if command -v sqlite3 &> /dev/null; then
+        if sqlite3 "$BACKUP_FILE" "PRAGMA integrity_check;" 2>/dev/null | grep -q "ok"; then
+          echo "✅ 数据库文件完整性验证通过"
+        else
+          echo "⚠️ 数据库文件完整性验证失败，但备份文件已生成"
+        fi
+      else
+        echo "ℹ️ 未安装 sqlite3 工具，跳过完整性验证"
+      fi
+    else
+      echo "❌ 备份文件为空或不存在"
+      return 1
+    fi
+  else
+    echo "❌ 数据库备份失败"
+    return 1
+  fi
+}
+
+
+
+
 # 卸载功能
 uninstall_panel() {
   echo "🗑️ 开始卸载面板..."
@@ -333,6 +391,11 @@ main() {
         exit 0
         ;;
       4)
+        export_migration_sql
+        delete_self
+        exit 0
+        ;;
+      5)
         echo "👋 退出脚本"
         delete_self
         exit 0
