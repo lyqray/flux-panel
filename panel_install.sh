@@ -8,8 +8,8 @@ export LC_ALL=C
 
 
 # 全局下载地址配置
-DOCKER_COMPOSEV4_URL="https://github.com/bqlpfy/flux-panel/releases/download/2.0.5-beta/docker-compose-v4.yml"
-DOCKER_COMPOSEV6_URL="https://github.com/bqlpfy/flux-panel/releases/download/2.0.5-beta/docker-compose-v6.yml"
+DOCKER_COMPOSEV4_URL="https://github.com/lyqray/flux-panel/releases/download/2.0.5-beta/docker-compose-v4.yml"
+DOCKER_COMPOSEV6_URL="https://github.com/lyqray/flux-panel/releases/download/2.0.5-beta/docker-compose-v6.yml"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
@@ -101,10 +101,10 @@ configure_docker_ipv6() {
 
       # 使用 jq 或 sed 添加 IPv6 配置
       if command -v jq &> /dev/null; then
-        $SUDO_CMD jq '. + {"ipv6": true, "fixed-cidr-v6": "fd00::/80"}' "$DOCKER_CONFIG" > /tmp/daemon.json && $SUDO_CMD mv /tmp/daemon.json "$DOCKER_CONFIG"
+        $SUDO_CMD jq '. + {"ipv6": true, "fixed-cidr-v6": "fd72::/80"}' "$DOCKER_CONFIG" > /tmp/daemon.json && $SUDO_CMD mv /tmp/daemon.json "$DOCKER_CONFIG"
       else
         # 如果没有 jq，使用 sed
-        $SUDO_CMD sed -i 's/^{$/{\n  "ipv6": true,\n  "fixed-cidr-v6": "fd00::\/80",/' "$DOCKER_CONFIG"
+        $SUDO_CMD sed -i 's/^{$/{\n  "ipv6": true,\n  "fixed-cidr-v6": "fd72::\/80",/' "$DOCKER_CONFIG"
       fi
 
       echo "🔄 重启 Docker 服务..."
@@ -123,7 +123,7 @@ configure_docker_ipv6() {
     $SUDO_CMD mkdir -p /etc/docker
     echo '{
   "ipv6": true,
-  "fixed-cidr-v6": "fd00::/80"
+  "fixed-cidr-v6": "fd72::/80"
 }' | $SUDO_CMD tee "$DOCKER_CONFIG" > /dev/null
 
     echo "🔄 重启 Docker 服务..."
@@ -147,7 +147,9 @@ show_menu() {
   echo "1. 安装面板"
   echo "2. 更新面板"
   echo "3. 卸载面板"
-  echo "4. 退出"
+  echo "4. 导出备份"
+  echo "5. 导入备份（覆盖现有数据，谨慎操作）"
+  echo "6. 退出"
   echo "==============================================="
 }
 
@@ -316,6 +318,190 @@ uninstall_panel() {
   echo "✅ 卸载完成"
 }
 
+
+
+# 导出数据库备份
+export_migration_sql() {
+  echo "📄 开始导出 SQLite 数据库备份..."
+
+  # 检查后端容器是否运行
+  if ! docker ps --format "{{.Names}}" | grep -q "^springboot-backend$"; then
+    echo "❌ 后端容器未运行，无法备份数据库"
+    echo "🔍 当前运行的容器："
+    docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+    return 1
+  fi
+
+  # 检查数据库文件是否存在
+  if ! docker exec springboot-backend ls /app/data/gost.db > /dev/null 2>&1; then
+    echo "❌ 数据库文件 /app/data/gost.db 不存在"
+    return 1
+  fi
+
+  # 生成备份文件名
+  BACKUP_FILE="gost_backup_$(date +%Y%m%d_%H%M%S).db"
+  
+  echo "⏳ 正在备份数据库..."
+  
+  # 使用 docker cp 命令复制数据库文件
+  if docker cp springboot-backend:/app/data/gost.db "./$BACKUP_FILE"; then
+    echo "✅ 数据库备份成功"
+    
+    # 检查文件大小
+    if [[ -f "$BACKUP_FILE" ]] && [[ -s "$BACKUP_FILE" ]]; then
+      FILE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+      echo "📁 文件位置: $(pwd)/$BACKUP_FILE"
+      echo "📊 文件大小: $FILE_SIZE"
+      
+      # 验证 SQLite 文件完整性（可选）
+      if command -v sqlite3 &> /dev/null; then
+        if sqlite3 "$BACKUP_FILE" "PRAGMA integrity_check;" 2>/dev/null | grep -q "ok"; then
+          echo "✅ 数据库文件完整性验证通过"
+        else
+          echo "⚠️ 数据库文件完整性验证失败，但备份文件已生成"
+        fi
+      else
+        echo "ℹ️ 未安装 sqlite3 工具，跳过完整性验证"
+      fi
+    else
+      echo "❌ 备份文件为空或不存在"
+      return 1
+    fi
+  else
+    echo "❌ 数据库备份失败"
+    return 1
+  fi
+}
+
+
+
+# 导入数据库备份
+import_backup() {
+  echo "🔄 开始导入数据库备份（覆盖现有数据）"
+  echo "⚠️  警告：此操作将覆盖现有数据库，且不可恢复！"
+
+  # 检查后端容器是否运行
+  if ! docker ps --format "{{.Names}}" | grep -q "^springboot-backend$"; then
+    echo "❌ 后端容器未运行，无法导入备份"
+    echo "🔍 当前运行的容器："
+    docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+    return 1
+  fi
+
+  # 列出当前目录下的备份文件
+  echo "📁 当前目录下的备份文件："
+  local backup_files=($(ls -1 *.db 2>/dev/null | grep -E "gost_backup_.*\.db$" | head -10))
+  
+  if [[ ${#backup_files[@]} -eq 0 ]]; then
+    echo "❌ 未找到备份文件（文件名格式：gost_backup_年月日_时分秒.db）"
+    echo "💡 请先将备份文件放在当前目录下"
+    return 1
+  fi
+
+  # 显示备份文件列表
+  echo "==============================================="
+  echo "           可用的备份文件"
+  echo "==============================================="
+  for i in "${!backup_files[@]}"; do
+    local file_size=$(du -h "${backup_files[$i]}" | cut -f1)
+    local file_date=$(stat -c %y "${backup_files[$i]}" 2>/dev/null || stat -f "%Sm" "${backup_files[$i]}" 2>/dev/null || echo "未知时间")
+    echo "$((i+1)). ${backup_files[$i]} ($file_size) - $file_date"
+  done
+  echo "==============================================="
+
+  # 选择备份文件
+  read -p "请选择要导入的备份文件编号 (1-${#backup_files[@]}): " file_choice
+  
+  if ! [[ "$file_choice" =~ ^[0-9]+$ ]] || [[ "$file_choice" -lt 1 ]] || [[ "$file_choice" -gt ${#backup_files[@]} ]]; then
+    echo "❌ 无效的选择"
+    return 1
+  fi
+
+  local selected_file="${backup_files[$((file_choice-1))]}"
+  
+  # 确认操作
+  echo ""
+  echo "⚠️  即将导入备份文件: $selected_file"
+  echo "⚠️  此操作将："
+  echo "    - 停止后端服务"
+  echo "    - 覆盖现有数据库"
+  echo "    - 重启后端服务"
+  echo ""
+  read -p "确认执行此危险操作吗？请输入 'CONFIRM' 继续: " confirm_input
+  
+  if [[ "$confirm_input" != "CONFIRM" ]]; then
+    echo "❌ 操作已取消"
+    return 0
+  fi
+
+  echo "⏳ 开始导入备份..."
+
+  # 停止后端服务
+  echo "🛑 停止后端服务..."
+  if ! docker stop springboot-backend > /dev/null 2>&1; then
+    echo "❌ 停止后端服务失败"
+    return 1
+  fi
+
+  # 备份当前数据库（可选）
+  echo "📦 备份当前数据库..."
+  local current_backup="current_db_backup_$(date +%Y%m%d_%H%M%S).db"
+  if docker cp springboot-backend:/app/data/gost.db "./$current_backup" 2>/dev/null; then
+    echo "✅ 当前数据库已备份为: $current_backup"
+  else
+    echo "⚠️ 当前数据库备份失败，继续执行导入..."
+  fi
+
+  # 导入备份文件
+  echo "⬆️ 导入备份文件: $selected_file"
+  if docker cp "./$selected_file" springboot-backend:/app/data/gost.db; then
+    echo "✅ 备份文件导入成功"
+    
+    # 设置正确的文件权限
+    docker exec springboot-backend chmod 644 /app/data/gost.db 2>/dev/null || true
+    
+    # 验证导入的数据库
+    echo "🔍 验证导入的数据库..."
+    if docker exec springboot-backend ls -la /app/data/gost.db > /dev/null 2>&1; then
+      echo "✅ 数据库文件验证通过"
+    else
+      echo "❌ 数据库文件验证失败"
+    fi
+  else
+    echo "❌ 备份文件导入失败"
+    # 尝试恢复服务
+    docker start springboot-backend > /dev/null 2>&1 || true
+    return 1
+  fi
+
+  # 重启后端服务
+  echo "🚀 重启后端服务..."
+  if docker start springboot-backend > /dev/null 2>&1; then
+    echo "✅ 后端服务启动成功"
+    
+    # 等待服务健康检查
+    echo "⏳ 等待服务就绪..."
+    for i in {1..30}; do
+      local health_status=$(docker inspect -f '{{.State.Health.Status}}' springboot-backend 2>/dev/null || echo "unknown")
+      if [[ "$health_status" == "healthy" ]]; then
+        echo "✅ 后端服务健康检查通过"
+        break
+      elif [[ $i -eq 30 ]]; then
+        echo "⚠️ 后端服务启动超时，但已运行"
+      fi
+      sleep 2
+    done
+  else
+    echo "❌ 后端服务启动失败"
+    return 1
+  fi
+
+  echo "🎉 数据库导入完成"
+  echo "💡 如果遇到问题，可以使用之前自动备份的文件恢复: $current_backup"
+}
+
+
+
 # 主逻辑
 main() {
 
@@ -341,6 +527,16 @@ main() {
         exit 0
         ;;
       4)
+        export_migration_sql
+        delete_self
+        exit 0
+        ;;
+      5)
+        import_backup
+        delete_self
+        exit 0
+        ;;
+      6)
         echo "👋 退出脚本"
         delete_self
         exit 0

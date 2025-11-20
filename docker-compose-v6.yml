@@ -1,6 +1,6 @@
 services:
   backend:
-    image: bqlpfy/springboot-backend:2.0.5-beta
+    image: lyqray/springboot-backend:2.0.5-beta
     container_name: springboot-backend
     restart: unless-stopped
     environment:
@@ -25,7 +25,7 @@ services:
       start_period: 60s
 
   frontend:
-    image: bqlpfy/vite-frontend:2.0.5-beta
+    image: lyqray/vite-frontend:2.0.5-beta
     container_name: vite-frontend
     restart: unless-stopped
     ports:
@@ -35,6 +35,22 @@ services:
         condition: service_healthy
     networks:
       - gost-network
+
+  # 新增 SQLite 网页管理工具
+  sqlite-web:
+    image: coleifer/sqlite-web
+    container_name: gost-sqlite-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8066:8080"  # sqlite-web： 默认无密码，禁止外网访问。自行设置nginx域名反对并加密访问。
+    volumes:
+      - sqlite_data:/data
+    environment:
+      - SQLITE_DATABASE=gost.db
+    networks:
+      - gost-network
+    depends_on:
+      - backend
 
 
 volumes:
@@ -53,5 +69,5 @@ networks:
     enable_ipv6: true
     ipam:
       config:
-        - subnet: 172.20.0.0/16 
-        - subnet: fd00:dead:beef::/48
+        - subnet: 172.66.0.0/16 
+        - subnet: fd72:6666:beef::/48
