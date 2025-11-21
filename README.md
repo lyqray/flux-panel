@@ -17,17 +17,17 @@
 1.进入1.x的后台在转发页面导出所有转发保存
 2.使用1.x节点脚本卸载所有节点
 ```
-curl -L https://github.com/bqlpfy/flux-panel/releases/download/1.4.2/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+curl -L https://github.com/lyqray/flux-panel/releases/download/1.4.2/install.sh -o install.sh && chmod +x install.sh && ./install.sh
 ```
 3.使用1.x面版脚本卸载面板
 
 ```
-curl -L https://github.com/bqlpfy/flux-panel/releases/download/1.4.2/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+curl -L https://github.com/lyqray/flux-panel/releases/download/1.4.2/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
 ```
 4.使用2.x脚本安装面板
 
 ```
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
 ```
 
 
@@ -53,21 +53,29 @@ curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/pane
 #### 快速部署
 面板端(1.x)：
 ```bash
-curl -L https://github.com/bqlpfy/flux-panel/releases/download/1.4.2/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+curl -L https://github.com/lyqray/flux-panel/releases/download/1.4.2/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
 ```
 节点端(1.x)：
 ```bash
-curl -L https://github.com/bqlpfy/flux-panel/releases/download/1.4.2/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+curl -L https://github.com/lyqray/flux-panel/releases/download/1.4.2/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+```
+节点端2(1.x)【单节点机复用】：
+```bash
+curl -L https://github.com/lyqray/flux-panel/releases/download/1.4.2/install2.sh -o install2.sh && chmod +x install2.sh && ./install2.sh
 
 ```
 
 面板端(2.x)：
 ```bash
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
 ```
 节点端(2.x)：
 ```bash
-curl -L https://raw.githubusercontent.com/bqlpfy/flux-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+```
+节点端2(2.x)【单节点机复用】：
+```bash
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/install2.sh -o install2.sh && chmod +x install2.sh && ./install2.sh
 
 ```
 
