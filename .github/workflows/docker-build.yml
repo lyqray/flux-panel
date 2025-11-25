@@ -260,6 +260,8 @@ jobs:
           echo "📤 上传安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
           gh release upload "${VERSION}" ./install2.sh --clobber
+          gh release upload "${VERSION}" ./install3.sh --clobber
+          gh release upload "${VERSION}" ./install4.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
           
           echo "📤 上传 Docker Compose 配置文件..."
@@ -334,6 +336,8 @@ jobs:
           echo "📤 更新安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
           gh release upload "${VERSION}" ./install2.sh --clobber
+          gh release upload "${VERSION}" ./install3.sh --clobber
+          gh release upload "${VERSION}" ./install4.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
           
           # 上传 Docker Compose 配置文件（覆盖）
