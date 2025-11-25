@@ -9,6 +9,8 @@ on:
     branches:
       - main
       - beta
+  # 支持手动触发 Action
+  workflow_dispatch:
 
 jobs:
   check-version:
@@ -150,8 +152,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t bqlpfy/vite-frontend:latest \
-            -t bqlpfy/vite-frontend:${VERSION} \
+            -t lyqray/vite-frontend:latest \
+            -t lyqray/vite-frontend:${VERSION} \
             ./vite-frontend
 
   build-java:
@@ -194,8 +196,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t bqlpfy/springboot-backend:latest \
-            -t bqlpfy/springboot-backend:${VERSION} \
+            -t lyqray/springboot-backend:latest \
+            -t lyqray/springboot-backend:${VERSION} \
             ./springboot-backend
 
   create-release:
@@ -257,6 +259,7 @@ jobs:
           
           echo "📤 上传安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
+          gh release upload "${VERSION}" ./install2.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
           
           echo "📤 上传 Docker Compose 配置文件..."
@@ -330,6 +333,7 @@ jobs:
           # 上传安装脚本（覆盖）
           echo "📤 更新安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
+          gh release upload "${VERSION}" ./install2.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
           
           # 上传 Docker Compose 配置文件（覆盖）
