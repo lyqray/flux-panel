@@ -39,6 +39,14 @@ curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/inst
 节点端2(稳定版)：
 ```bash
 curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/install2.sh -o install2.sh && chmod +x install2.sh && ./install2.sh
+```
+节点端3(稳定版)：
+```bash
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/install3.sh -o install3.sh && chmod +x install3.sh && ./install3.sh
+```
+节点端4(稳定版)：
+```bash
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/main/install4.sh -o install4.sh && chmod +x install4.sh && ./install4.sh
 
 ```
 
@@ -53,6 +61,14 @@ curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/beta/inst
 节点端2(开发版)：
 ```bash
 curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/beta/install2.sh -o install2.sh && chmod +x install2.sh && ./install2.sh
+```
+节点端3(开发版)：
+```bash
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/beta/install3.sh -o install3.sh && chmod +x install3.sh && ./install3.sh
+```
+节点端4(开发版)：
+```bash
+curl -L https://raw.githubusercontent.com/lyqray/flux-panel/refs/heads/beta/install4.sh -o install4.sh && chmod +x install4.sh && ./install4.sh
 
 ```
 
