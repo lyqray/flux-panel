@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/go-gost/x/config"
-	"github.com/go-gost/x/internal/util/crypto"
 	"github.com/go-gost/x/service"
+	"github.com/go-gost/x/internal/util/crypto"
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/host"
@@ -87,9 +87,6 @@ type TcpPingResponse struct {
 
 type WebSocketReporter struct {
 	url            string
-	addr           string // 保存服务器地址
-	secret         string // 保存密钥
-	version        string // 保存版本号
 	conn           *websocket.Conn
 	reconnectTime  time.Duration
 	pingInterval   time.Duration
@@ -198,25 +195,7 @@ func (w *WebSocketReporter) connect() error {
 		w.connecting = false
 	}()
 
-	// 重新读取 config.json 获取最新的协议配置
-	type LocalConfig struct {
-		Addr   string `json:"addr"`
-		Secret string `json:"secret"`
-		Http   int    `json:"http"`
-		Tls    int    `json:"tls"`
-		Socks  int    `json:"socks"`
-	}
-
-	var cfg LocalConfig
-	if b, err := os.ReadFile("config.json"); err == nil {
-		json.Unmarshal(b, &cfg)
-	}
-
-	// 使用最新的配置重新构建 URL
-	currentURL := "ws://" + w.addr + "/system-info?type=1&secret=" + w.secret + "&version=" + w.version +
-		"&http=" + strconv.Itoa(cfg.Http) + "&tls=" + strconv.Itoa(cfg.Tls) + "&socks=" + strconv.Itoa(cfg.Socks)
-
-	u, err := url.Parse(currentURL)
+	u, err := url.Parse(w.url)
 	if err != nil {
 		return fmt.Errorf("解析URL失败: %v", err)
 	}
@@ -246,7 +225,7 @@ func (w *WebSocketReporter) connect() error {
 		return nil
 	})
 
-	fmt.Printf("✅ WebSocket连接建立成功 (http=%d, tls=%d, socks=%d)\n", cfg.Http, cfg.Tls, cfg.Socks)
+	fmt.Printf("✅ WebSocket连接建立成功\n")
 	return nil
 }
 
@@ -796,81 +775,81 @@ func (w *WebSocketReporter) handleDeleteLimiter(data interface{}) error {
 
 // handleSetProtocol 处理设置屏蔽协议的命令
 func (w *WebSocketReporter) handleSetProtocol(data interface{}) error {
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("序列化协议设置失败: %v", err)
-	}
+    jsonData, err := json.Marshal(data)
+    if err != nil {
+        return fmt.Errorf("序列化协议设置失败: %v", err)
+    }
 
-	// 支持 {"http":0/1, "tls":0/1, "socks":0/1}
-	var req struct {
-		HTTP  *int `json:"http"`
-		TLS   *int `json:"tls"`
-		SOCKS *int `json:"socks"`
-	}
-	if err := json.Unmarshal(jsonData, &req); err != nil {
-		return fmt.Errorf("解析协议设置失败: %v", err)
-	}
+    // 支持 {"http":0/1, "tls":0/1, "socks":0/1}
+    var req struct {
+        HTTP  *int `json:"http"`
+        TLS   *int `json:"tls"`
+        SOCKS *int `json:"socks"`
+    }
+    if err := json.Unmarshal(jsonData, &req); err != nil {
+        return fmt.Errorf("解析协议设置失败: %v", err)
+    }
 
-	// 读取当前值作为默认
-	httpVal, tlsVal, socksVal := 0, 0, 0
+    // 读取当前值作为默认
+    httpVal, tlsVal, socksVal := 0, 0, 0
 
-	if req.HTTP != nil {
-		if *req.HTTP != 0 && *req.HTTP != 1 {
-			return fmt.Errorf("http 取值必须为0或1")
-		}
-		httpVal = *req.HTTP
-	}
-	if req.TLS != nil {
-		if *req.TLS != 0 && *req.TLS != 1 {
-			return fmt.Errorf("tls 取值必须为0或1")
-		}
-		tlsVal = *req.TLS
-	}
-	if req.SOCKS != nil {
-		if *req.SOCKS != 0 && *req.SOCKS != 1 {
-			return fmt.Errorf("socks 取值必须为0或1")
-		}
-		socksVal = *req.SOCKS
-	}
+    if req.HTTP != nil {
+        if *req.HTTP != 0 && *req.HTTP != 1 {
+            return fmt.Errorf("http 取值必须为0或1")
+        }
+        httpVal = *req.HTTP
+    }
+    if req.TLS != nil {
+        if *req.TLS != 0 && *req.TLS != 1 {
+            return fmt.Errorf("tls 取值必须为0或1")
+        }
+        tlsVal = *req.TLS
+    }
+    if req.SOCKS != nil {
+        if *req.SOCKS != 0 && *req.SOCKS != 1 {
+            return fmt.Errorf("socks 取值必须为0或1")
+        }
+        socksVal = *req.SOCKS
+    }
 
-	// 设置至 service，全量传递（未提供的值沿用0）
-	service.SetProtocolBlock(httpVal, tlsVal, socksVal)
+    // 设置至 service，全量传递（未提供的值沿用0）
+    service.SetProtocolBlock(httpVal, tlsVal, socksVal)
 
-	// 同步写入本地 config.json
-	if err := updateLocalConfigJSON(httpVal, tlsVal, socksVal); err != nil {
-		return fmt.Errorf("写入config.json失败: %v", err)
-	}
-	return nil
+    // 同步写入本地 config.json
+    if err := updateLocalConfigJSON(httpVal, tlsVal, socksVal); err != nil {
+        return fmt.Errorf("写入config.json失败: %v", err)
+    }
+    return nil
 }
 
 // updateLocalConfigJSON 将 http/tls/socks 写入工作目录下的 config.json
 func updateLocalConfigJSON(httpVal int, tlsVal int, socksVal int) error {
-	path := "config.json"
+    path := "config.json"
 
-	// 读取现有配置
-	type LocalConfig struct {
-		Addr   string `json:"addr"`
-		Secret string `json:"secret"`
-		Http   int    `json:"http"`
-		Tls    int    `json:"tls"`
-		Socks  int    `json:"socks"`
-	}
+    // 读取现有配置
+    type LocalConfig struct {
+        Addr   string `json:"addr"`
+        Secret string `json:"secret"`
+        Http   int    `json:"http"`
+        Tls    int    `json:"tls"`
+        Socks  int    `json:"socks"`
+    }
 
-	var cfg LocalConfig
-	if b, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(b, &cfg)
-	}
+    var cfg LocalConfig
+    if b, err := os.ReadFile(path); err == nil {
+        _ = json.Unmarshal(b, &cfg)
+    }
 
-	cfg.Http = httpVal
-	cfg.Tls = tlsVal
-	cfg.Socks = socksVal
+    cfg.Http = httpVal
+    cfg.Tls = tlsVal
+    cfg.Socks = socksVal
 
-	// 写回
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
+    // 写回
+    data, err := json.MarshalIndent(cfg, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(path, data, 0644)
 }
 
 // handleCall 处理服务端的call回调消息
@@ -1042,16 +1021,12 @@ func getMemoryInfo() MemoryInfo {
 // StartWebSocketReporterWithConfig 使用配置字段启动WebSocket报告器
 func StartWebSocketReporterWithConfig(addr string, secret string, http int, tls int, socks int, version string) *WebSocketReporter {
 
-	// 构建初始 WebSocket URL
+	// 构建包含本机IP的WebSocket URL
 	fullURL := "ws://" + addr + "/system-info?type=1&secret=" + secret + "&version=" + version + "&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
 
 	fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)
 
 	reporter := NewWebSocketReporter(fullURL, secret)
-	// 保存 addr, secret, version 供重连时使用
-	reporter.addr = addr
-	reporter.secret = secret
-	reporter.version = version
 	reporter.Start()
 	return reporter
 }
@@ -1131,32 +1106,6 @@ func tcpPingHost(ip string, port int, count int, timeoutMs int) (float64, float6
 	target := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
 
 	fmt.Printf("🔍 开始TCP ping测试: %s，次数: %d，超时: %dms\n", target, count, timeoutMs)
-
-	// 如果是域名，先解析一次DNS，避免每次连接都重新解析导致延迟累加
-	if net.ParseIP(ip) == nil {
-		// 是域名，需要解析
-		fmt.Printf("🔍 检测到域名，正在解析DNS...\n")
-		dnsStart := time.Now()
-
-		addrs, err := net.LookupHost(ip)
-		dnsDuration := time.Since(dnsStart)
-
-		if err != nil {
-			return 0, 100.0, fmt.Errorf("DNS解析失败: %v", err)
-		}
-		if len(addrs) == 0 {
-			return 0, 100.0, fmt.Errorf("DNS解析未返回任何IP地址")
-		}
-
-		fmt.Printf("✅ DNS解析完成 (%.2fms)，解析到 %d 个IP: %v\n",
-			dnsDuration.Seconds()*1000, len(addrs), addrs)
-
-		// 使用第一个解析到的IP进行测试
-		target = net.JoinHostPort(addrs[0], fmt.Sprintf("%d", port))
-		fmt.Printf("🎯 使用IP地址进行测试: %s\n", target)
-	} else {
-		fmt.Printf("🎯 使用IP地址进行测试: %s\n", target)
-	}
 
 	for i := 0; i < count; i++ {
 		start := time.Now()
