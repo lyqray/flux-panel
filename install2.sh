@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置路径
-INSTALL_DIR="/etc/flux_agent"
+INSTALL_DIR="/etc/flux_agent2"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 
 # --- 全局环境检查 ---
@@ -71,8 +71,8 @@ get_config_params() {
 }
 
 # 1. 安装功能
-install_flux_agent() {
-  echo "🚀 开始安装 Flux-Agent (Docker)..."
+install_flux_agent2() {
+  echo "🚀 开始安装 Flux-Agent2 (Docker)..."
   get_config_params
   
   # 停止可能存在的旧容器，防止 Text file busy
@@ -82,12 +82,12 @@ install_flux_agent() {
 
   mkdir -p "$INSTALL_DIR"
   echo "⬇️ 下载执行文件..."
-  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent"
-  if [[ ! -s "$INSTALL_DIR/flux_agent" ]]; then
+  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent2"
+  if [[ ! -s "$INSTALL_DIR/flux_agent2" ]]; then
     echo "❌ 下载失败。"
     exit 1
   fi
-  chmod +x "$INSTALL_DIR/flux_agent"
+  chmod +x "$INSTALL_DIR/flux_agent2"
 
   cat > "$INSTALL_DIR/config.json" <<EOF
 {
@@ -100,10 +100,10 @@ EOF
 
   cat > "$COMPOSE_FILE" <<EOF
 services:
-  flux_agent:
+  flux_agent2:
     image: alpine:3.23
     # image: debian:bookworm-slim
-    container_name: flux_agent
+    container_name: flux_agent2
     restart: unless-stopped
     network_mode: host
     ulimits:  # 放宽高并发数限制
@@ -116,7 +116,7 @@ services:
     working_dir: /etc/gost
     volumes:
       - ./:/etc/gost
-    command: ["/etc/gost/flux_agent", "-C", "/etc/gost/config.json", "-C", "/etc/gost/gost.json"]
+    command: ["/etc/gost/flux_agent2", "-C", "/etc/gost/config.json", "-C", "/etc/gost/gost.json"]
 EOF
 
   cd "$INSTALL_DIR" && $DOCKER_CMD up -d
@@ -124,8 +124,8 @@ EOF
 }
 
 # 2. 更新功能 (仅更新二进制文件并重启)
-update_flux_agent() {
-  echo "🔄 正在更新 flux_agent 二进制文件..."
+update_flux_agent2() {
+  echo "🔄 正在更新 flux_agent2 二进制文件..."
   if [ ! -d "$INSTALL_DIR" ] || [ ! -f "$COMPOSE_FILE" ]; then
     echo "❌ 未检测到已安装的服务，请先选择 1 进行安装。"
     return 1
@@ -133,16 +133,16 @@ update_flux_agent() {
 
   # 必须先停掉容器，否则无法覆盖二进制文件 (Text file busy)
   echo "🛑 停止当前容器..."
-  cd "$INSTALL_DIR" && $DOCKER_CMD stop flux_agent 2>/dev/null
+  cd "$INSTALL_DIR" && $DOCKER_CMD stop flux_agent2 2>/dev/null
 
   echo "⬇️ 下载最新二进制文件..."
-  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent"
-  if [[ ! -s "$INSTALL_DIR/flux_agent" ]]; then
+  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent2"
+  if [[ ! -s "$INSTALL_DIR/flux_agent2" ]]; then
     echo "❌ 下载失败。"
-    $DOCKER_CMD start flux_agent # 失败了要把旧的拉起来
+    $DOCKER_CMD start flux_agent2 # 失败了要把旧的拉起来
     exit 1
   fi
-  chmod +x "$INSTALL_DIR/flux_agent"
+  chmod +x "$INSTALL_DIR/flux_agent2"
 
   echo "🚀 重启容器..."
   $DOCKER_CMD up -d
@@ -150,7 +150,7 @@ update_flux_agent() {
 }
 
 # 3. 卸载功能
-uninstall_flux_agent() {
+uninstall_flux_agent2() {
   echo "🗑️ 正在卸载..."
   if [ -d "$INSTALL_DIR" ]; then
     cd "$INSTALL_DIR" && $DOCKER_CMD down
@@ -172,14 +172,14 @@ done
 # 主菜单逻辑
 main() {
   if [[ -n "$SERVER_ADDR" && -n "$SECRET" ]]; then
-    install_flux_agent
+    install_flux_agent2
     delete_self
     exit 0
   fi
 
   while true; do
     echo "==============================================="
-    echo "        Flux-Agent 管理脚本 (Docker版)"
+    echo "        Flux-Agent2 管理脚本 (Docker版)"
     echo "==============================================="
     echo "1. 安装"
     echo "2. 更新"
@@ -190,17 +190,17 @@ main() {
 
     case $choice in
       1)
-        install_flux_agent
+        install_flux_agent2
         delete_self
         exit 0
         ;;
       2)
-        update_flux_agent
+        update_flux_agent2
         delete_self
         exit 0
         ;;
       3)
-        uninstall_flux_agent
+        uninstall_flux_agent2
         delete_self
         exit 0
         ;;

@@ -1,6 +1,6 @@
 services:
   backend:
-    image: bqlpfy/springboot-backend:2.0.7-beta
+    image: lyqray/springboot-backend:2.0.7-beta
     container_name: springboot-backend
     restart: unless-stopped
     environment:
@@ -25,7 +25,7 @@ services:
       start_period: 60s
 
   frontend:
-    image: bqlpfy/vite-frontend:2.0.7-beta
+    image: lyqray/vite-frontend:2.0.7-beta
     container_name: vite-frontend
     restart: unless-stopped
     ports:
@@ -52,4 +52,4 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16 
+        - subnet: 172.66.0.0/16 
