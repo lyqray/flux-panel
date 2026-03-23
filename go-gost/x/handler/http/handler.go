@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/asaskevich/govalidator"
+	"github.com/go-gost/core/auth"
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
@@ -30,8 +32,8 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	xbypass "github.com/go-gost/x/bypass"
-	ctxvalue "github.com/go-gost/x/ctx"
-	ctx_internal "github.com/go-gost/x/internal/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
@@ -130,22 +132,19 @@ func (h *httpHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 		LocalAddr:  conn.LocalAddr().String(),
 		Proto:      "http",
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
+		SID:        xctx.SidFromContext(ctx).String(),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -229,8 +228,9 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 	ro.Host = addr
 
 	fields := map[string]any{
-		"dst":  addr,
-		"host": addr,
+		"dst":     addr,
+		"host":    addr,
+		"network": network,
 	}
 
 	if u, _, _ := h.basicProxyAuth(req.Header.Get("Proxy-Authorization")); u != "" {
@@ -288,14 +288,17 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 		return errors.New("authentication failed")
 	}
 
+	log = log.WithFields(map[string]any{"clientID": clientID})
+	ro.ClientID = clientID
+
 	if resp.Header.Get("Proxy-Agent") == "" {
 		resp.Header.Set("Proxy-Agent", h.md.proxyAgent)
 	}
 
-	ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(clientID))
+	ctx = xctx.ContextWithClientID(ctx, xctx.ClientID(clientID))
 
 	if h.options.Bypass != nil &&
-		h.options.Bypass.Contains(ctx, network, addr) {
+		h.options.Bypass.Contains(ctx, network, addr, bypass.WithService(h.options.Service)) {
 		resp.StatusCode = http.StatusForbidden
 
 		if log.IsLevelEnabled(logger.TraceLevel) {
@@ -338,8 +341,8 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 		return h.handleProxy(ctx, conn, req, ro, log)
 	}
 
-	ctx = ctx_internal.ContextWithRecorderObject(ctx, ro)
-	ctx = ctxvalue.ContextWithLogger(ctx, log)
+	ctx = ictx.ContextWithRecorderObject(ctx, ro)
+	ctx = ictx.ContextWithLogger(ctx, log)
 	cc, err := h.dial(ctx, "tcp", addr)
 
 	if err != nil {
@@ -354,14 +357,17 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 	}
 	defer cc.Close()
 
-	resp.StatusCode = http.StatusOK
-	resp.Status = "200 Connection established"
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
+
+	b := []byte("HTTP/1.1 200 Connection established\r\n" +
+		"Proxy-Agent: " + h.md.proxyAgent + "\r\n\r\n")
 
 	if log.IsLevelEnabled(logger.TraceLevel) {
-		dump, _ := httputil.DumpResponse(resp, false)
-		log.Trace(string(dump))
+		log.Trace(string(b))
 	}
-	if err = resp.Write(conn); err != nil {
+	if _, err = conn.Write(b); err != nil {
 		log.Error(err)
 		return err
 	}
@@ -401,14 +407,16 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
-			return sniffer.HandleHTTP(ctx, conn,
+			return sniffer.HandleHTTP(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
 				sniffing.WithLog(log),
 			)
 		case sniffing.ProtoTLS:
-			return sniffer.HandleTLS(ctx, conn,
+			return sniffer.HandleTLS(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
@@ -419,7 +427,8 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 
 	start := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), addr)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(start),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), addr)
@@ -454,13 +463,13 @@ func (h *httpHandler) handleProxy(ctx context.Context, conn net.Conn, req *http.
 			log.Trace(string(dump))
 		}
 
-		if close, err := h.proxyRoundTrip(ctx, xio.NewReadWriter(br, conn), req, ro, &pStats, log); err != nil || close {
+		if close, err := h.proxyRoundTrip(ctx, xio.NewReadWriteCloser(br, conn, conn), req, ro, &pStats, log); err != nil || close {
 			return err
 		}
 	}
 }
 
-func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (close bool, err error) {
+func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriteCloser, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (close bool, err error) {
 	close = true
 
 	ro2 := &xrecorder.HandlerRecorderObject{}
@@ -508,16 +517,6 @@ func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req 
 			Header:        req.Header.Clone(),
 		},
 	}
-	if clientIP := xhttp.GetClientIP(req); clientIP != nil {
-		ro.ClientIP = clientIP.String()
-	}
-
-	clientAddr := ro.RemoteAddr
-	if ro.ClientIP != "" {
-		if _, port, _ := net.SplitHostPort(ro.RemoteAddr); port != "" {
-			clientAddr = net.JoinHostPort(ro.ClientIP, port)
-		}
-	}
 
 	// HTTP/1.0
 	http10 := req.ProtoMajor == 1 && req.ProtoMinor == 0
@@ -543,7 +542,7 @@ func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req 
 	ro.HTTP.StatusCode = res.StatusCode
 
 	if h.options.Bypass != nil &&
-		h.options.Bypass.Contains(ctx, "tcp", host) {
+		h.options.Bypass.Contains(ctx, "tcp", host, bypass.WithService(h.options.Service)) {
 		res.StatusCode = http.StatusForbidden
 
 		if log.IsLevelEnabled(logger.TraceLevel) {
@@ -571,9 +570,8 @@ func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req 
 		}
 	}
 
-	ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(clientAddr))
-	ctx = ctx_internal.ContextWithRecorderObject(ctx, ro)
-	ctx = ctxvalue.ContextWithLogger(ctx, log)
+	ctx = ictx.ContextWithRecorderObject(ctx, ro)
+	ctx = ictx.ContextWithLogger(ctx, log)
 
 	resp, err := h.transport.RoundTrip(req.WithContext(ctx))
 
@@ -646,17 +644,22 @@ func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req 
 func (h *httpHandler) dial(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 	switch h.md.hash {
 	case "host":
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: addr})
 	}
 
-	if log := ctxvalue.LoggerFromContext(ctx); log != nil {
+	if log := ictx.LoggerFromContext(ctx); log != nil {
 		log.Debugf("dial: new connection to host %s", addr)
 	}
 
 	var buf bytes.Buffer
-	conn, err = h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), network, addr)
-	if ro := ctx_internal.RecorderObjectFromContext(ctx); ro != nil {
+	conn, err = h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, addr)
+	if ro := ictx.RecorderObjectFromContext(ctx); ro != nil {
 		ro.Route = buf.String()
+
+		if conn != nil {
+			ro.SrcAddr = conn.LocalAddr().String()
+			ro.DstAddr = conn.RemoteAddr().String()
+		}
 	}
 
 	return
@@ -669,7 +672,7 @@ func upgradeType(h http.Header) string {
 	return h.Get("Upgrade")
 }
 
-func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWriter, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWriteCloser, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	reqUpType := upgradeType(req.Header)
 	resUpType := upgradeType(res.Header)
 	if !strings.EqualFold(reqUpType, resUpType) {
@@ -690,7 +693,8 @@ func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWrite
 		return h.sniffingWebsocketFrame(ctx, rw, backConn, ro, log)
 	}
 
-	return xnet.Transport(rw, backConn)
+	// return xnet.Transport(rw, backConn)
+	return xnet.Pipe(ctx, rw, backConn)
 }
 
 func (h *httpHandler) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
@@ -855,7 +859,7 @@ func (h *httpHandler) authenticate(ctx context.Context, conn net.Conn, req *http
 	if h.options.Auther == nil {
 		return "", true
 	}
-	if id, ok = h.options.Auther.Authenticate(ctx, u, p); ok {
+	if id, ok = h.options.Auther.Authenticate(ctx, u, p, auth.WithService(h.options.Service)); ok {
 		return
 	}
 
@@ -888,7 +892,8 @@ func (h *httpHandler) authenticate(ctx context.Context, conn net.Conn, req *http
 			defer cc.Close()
 
 			req.Write(cc)
-			xnet.Transport(conn, cc)
+			// xnet.Transport(conn, cc)
+			xnet.Pipe(ctx, conn, cc)
 			return
 		case "file":
 			f, _ := os.Open(pr.Value)

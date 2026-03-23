@@ -9,6 +9,8 @@ import (
 	"net"
 	"time"
 
+	"github.com/go-gost/core/auth"
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
@@ -18,7 +20,8 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/gosocks4"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/util/sniffing"
 	stats_util "github.com/go-gost/x/internal/util/stats"
@@ -104,27 +107,24 @@ func (h *socks4Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 	start := time.Now()
 
 	ro := &xrecorder.HandlerRecorderObject{
-		Service:    h.options.Service,
 		Network:    "tcp",
+		Service:    h.options.Service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
+		SID:        xctx.SidFromContext(ctx).String(),
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -163,20 +163,26 @@ func (h *socks4Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 		return err
 	}
 
+	if userid := string(req.Userid); userid != "" {
+		log = log.WithFields(map[string]any{"user": userid})
+		ro.ClientID = userid
+	}
+
 	ro.Host = req.Addr.String()
 	log.Trace(req)
 
 	conn.SetReadDeadline(time.Time{})
 
 	if h.options.Auther != nil {
-		clientID, ok := h.options.Auther.Authenticate(ctx, string(req.Userid), "")
+		clientID, ok := h.options.Auther.Authenticate(ctx, string(req.Userid), "", auth.WithService(h.options.Service))
 		if !ok {
 			resp := gosocks4.NewReply(gosocks4.RejectedUserid, nil)
 			log.Trace(resp)
 			return resp.Write(conn)
 		}
-		ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(clientID))
+		ctx = xctx.ContextWithClientID(ctx, xctx.ClientID(clientID))
 		ro.ClientID = clientID
+		log = log.WithFields(map[string]any{"clientID": clientID})
 	}
 
 	switch req.Cmd {
@@ -208,7 +214,7 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 	log.Debugf("%s >> %s", conn.RemoteAddr(), addr)
 
 	{
-		clientID := ctxvalue.ClientIDFromContext(ctx)
+		clientID := xctx.ClientIDFromContext(ctx)
 		rw := traffic_wrapper.WrapReadWriter(
 			h.limiter,
 			conn,
@@ -231,7 +237,7 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 		conn = xnet.NewReadWriteConn(rw, rw, conn)
 	}
 
-	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", addr) {
+	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", addr, bypass.WithService(h.options.Service)) {
 		resp := gosocks4.NewReply(gosocks4.Rejected, nil)
 		log.Trace(resp)
 		log.Debug("bypass: ", addr)
@@ -240,11 +246,11 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 
 	switch h.md.hash {
 	case "host":
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: addr})
 	}
 
 	var buf bytes.Buffer
-	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", addr)
+	cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "tcp", addr)
 	ro.Route = buf.String()
 	if err != nil {
 		resp := gosocks4.NewReply(gosocks4.Failed, nil)
@@ -253,6 +259,10 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 		return err
 	}
 	defer cc.Close()
+
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
 
 	resp := gosocks4.NewReply(gosocks4.Granted, nil)
 	log.Trace(resp)
@@ -296,14 +306,16 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
-			return sniffer.HandleHTTP(ctx, conn,
+			return sniffer.HandleHTTP(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
 				sniffing.WithLog(log),
 			)
 		case sniffing.ProtoTLS:
-			return sniffer.HandleTLS(ctx, conn,
+			return sniffer.HandleTLS(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
@@ -314,7 +326,8 @@ func (h *socks4Handler) handleConnect(ctx context.Context, conn net.Conn, req *g
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), ro.Host)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), ro.Host)

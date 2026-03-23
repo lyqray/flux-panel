@@ -8,11 +8,12 @@ import (
 	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/gosocks5"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/internal/util/socks"
 )
 
 type serverSelector struct {
+	service       string
 	methods       []uint8
 	Authenticator auth.Authenticator
 	TLSConfig     *tls.Config
@@ -70,8 +71,8 @@ func (s *serverSelector) OnSelected(method uint8, conn net.Conn) (string, net.Co
 		var id string
 		if s.Authenticator != nil {
 			var ok bool
-			ctx := ctxvalue.ContextWithClientAddr(context.Background(), ctxvalue.ClientAddr(conn.RemoteAddr().String()))
-			id, ok = s.Authenticator.Authenticate(ctx, req.Username, req.Password)
+			ctx := xctx.ContextWithSrcAddr(context.Background(), conn.RemoteAddr())
+			id, ok = s.Authenticator.Authenticate(ctx, req.Username, req.Password, auth.WithService(s.service))
 			if !ok {
 				resp := gosocks5.NewUserPassResponse(gosocks5.UserPassVer, gosocks5.Failure)
 				if err := resp.Write(conn); err != nil {

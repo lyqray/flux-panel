@@ -56,6 +56,7 @@ interface Forward {
   remoteAddr: string;
   interfaceName?: string;
   strategy: string;
+  proxyProtocol: number;  // 添加 proxy_protocol 字段
   status: number;
   inFlow: number;
   outFlow: number;
@@ -82,6 +83,7 @@ interface ForwardForm {
   remoteAddr: string;
   interfaceName?: string;
   strategy: string;
+  proxyProtocol: number;  // ⬅️ 将 boolean 改为 number
 }
 
 interface AddressItem {
@@ -191,7 +193,8 @@ export default function ForwardPage() {
     inPort: null,
     remoteAddr: '',
     interfaceName: '',
-    strategy: 'fifo'
+    strategy: 'fifo',
+    proxyProtocol: 0  // 新增 proxyProtocol 字段
   });
   
   // 表单验证错误
@@ -444,7 +447,8 @@ export default function ForwardPage() {
       inPort: null,
       remoteAddr: '',
       interfaceName: '',
-      strategy: 'fifo'
+      strategy: 'fifo',
+      proxyProtocol: 0
     });
     setSelectedTunnel(null);
     setErrors({});
@@ -462,7 +466,9 @@ export default function ForwardPage() {
       inPort: forward.inPort,
       remoteAddr: forward.remoteAddr.split(',').join('\n'),
       interfaceName: forward.interfaceName || '',
-      strategy: forward.strategy || 'fifo'
+      strategy: forward.strategy || 'fifo',
+      // 修改这里：不再转换为 boolean，直接取数字值，如果没值则默认为 0 (关闭)
+      proxyProtocol: forward.proxyProtocol ?? 0
     });
     const tunnel = tunnels.find(t => t.id === forward.tunnelId);
     setSelectedTunnel(tunnel || null);
@@ -541,7 +547,9 @@ export default function ForwardPage() {
           inPort: form.inPort,
           remoteAddr: processedRemoteAddr,
           interfaceName: form.interfaceName,
-          strategy: addressCount > 1 ? form.strategy : 'fifo'
+          strategy: addressCount > 1 ? form.strategy : 'fifo',
+          // 修改这里：直接使用 form 中的数字值 (0, 1 或 2)
+          proxyProtocol: Number(form.proxyProtocol)
         };
         res = await updateForward(updateData);
       } else {
@@ -552,7 +560,9 @@ export default function ForwardPage() {
           inPort: form.inPort,
           remoteAddr: processedRemoteAddr,
           interfaceName: form.interfaceName,
-          strategy: addressCount > 1 ? form.strategy : 'fifo'
+          strategy: addressCount > 1 ? form.strategy : 'fifo',
+          // 修改这里：直接使用 form 中的数字值 (0, 1 或 2)
+          proxyProtocol: Number(form.proxyProtocol)
         };
         res = await createForward(createData);
       }
@@ -1657,6 +1667,39 @@ export default function ForwardPage() {
                         <SelectItem key="hash" >哈希模式 - IP哈希</SelectItem>
                       </Select>
                     )}
+
+                    <div className="flex flex-col gap-2">
+                        <div className="flex flex-col gap-1">
+                            <span className="text-sm font-medium text-foreground">发送 PROXY Protocol</span>
+                            <span className="text-xs text-default-500 mb-1">传递真实客户端 IP</span>
+                        </div>
+                        <Select
+                            variant="bordered"
+                            placeholder="请选择模式"
+                            selectedKeys={[form.proxyProtocol.toString()]}
+                            onChange={(e) => setForm(prev => ({ ...prev, proxyProtocol: Number(e.target.value) }))}
+                        >
+                            <SelectItem key="0" textValue="关闭">
+                                <div className="flex flex-col">
+                                    <span className="text-sm">关闭</span>
+                                    <span className="text-tiny text-default-400">不传递 Proxy Header</span>
+                                </div>
+                            </SelectItem>
+                            <SelectItem key="1" textValue="v1">
+                                <div className="flex flex-col">
+                                    <span className="text-sm">v1</span>
+                                    <span className="text-tiny text-default-400">文本格式，兼容性最好 (Nginx/HAProxy)</span>
+                                </div>
+                            </SelectItem>
+                            <SelectItem key="2" textValue="v2">
+                                <div className="flex flex-col">
+                                    <span className="text-sm">v2</span>
+                                    <span className="text-tiny text-default-400">二进制格式，解析速度快 (支持 UDP)</span>
+                                </div>
+                            </SelectItem>
+                        </Select>
+                    </div>
+
                   </div>
                 </ModalBody>
                 <ModalFooter>

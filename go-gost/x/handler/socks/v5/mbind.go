@@ -2,7 +2,6 @@ package v5
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"time"
 
@@ -10,16 +9,17 @@ import (
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/gosocks5"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/util/mux"
 	traffic_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
+	xrecorder "github.com/go-gost/x/recorder"
 )
 
-func (h *socks5Handler) handleMuxBind(ctx context.Context, conn net.Conn, network, address string, log logger.Logger) error {
+func (h *socks5Handler) handleMuxBind(ctx context.Context, conn net.Conn, network, address string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	log = log.WithFields(map[string]any{
-		"dst": fmt.Sprintf("%s/%s", address, network),
+		"dst": address,
 		"cmd": "mbind",
 	})
 
@@ -33,7 +33,7 @@ func (h *socks5Handler) handleMuxBind(ctx context.Context, conn net.Conn, networ
 	}
 
 	{
-		clientID := ctxvalue.ClientIDFromContext(ctx)
+		clientID := xctx.ClientIDFromContext(ctx)
 		rw := traffic_wrapper.WrapReadWriter(
 			h.limiter,
 			conn,
@@ -56,10 +56,10 @@ func (h *socks5Handler) handleMuxBind(ctx context.Context, conn net.Conn, networ
 		conn = xnet.NewReadWriteConn(rw, rw, conn)
 	}
 
-	return h.muxBindLocal(ctx, conn, network, address, log)
+	return h.muxBindLocal(ctx, conn, network, address, ro, log)
 }
 
-func (h *socks5Handler) muxBindLocal(ctx context.Context, conn net.Conn, network, address string, log logger.Logger) error {
+func (h *socks5Handler) muxBindLocal(ctx context.Context, conn net.Conn, network, address string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	lc := xnet.ListenConfig{
 		Netns: h.options.Netns,
 	}
@@ -74,6 +74,12 @@ func (h *socks5Handler) muxBindLocal(ctx context.Context, conn net.Conn, network
 		return err
 	}
 
+	log = log.WithFields(map[string]any{
+		"src":  ln.Addr().String(),
+		"bind": ln.Addr().String(),
+	})
+
+	ro.SrcAddr = ln.Addr().String()
 	socksAddr := gosocks5.Addr{}
 	err = socksAddr.ParseFrom(ln.Addr().String())
 	if err != nil {
@@ -82,6 +88,9 @@ func (h *socks5Handler) muxBindLocal(ctx context.Context, conn net.Conn, network
 
 	// Issue: may not reachable when host has multi-interface
 	socksAddr.Host, _, _ = net.SplitHostPort(conn.LocalAddr().String())
+	if h.md.publicAddr != "" {
+		socksAddr.Host = h.md.publicAddr
+	}
 	socksAddr.Type = 0
 	reply := gosocks5.NewReply(gosocks5.Succeeded, &socksAddr)
 	log.Trace(reply)
@@ -90,10 +99,6 @@ func (h *socks5Handler) muxBindLocal(ctx context.Context, conn net.Conn, network
 		ln.Close()
 		return err
 	}
-
-	log = log.WithFields(map[string]any{
-		"bind": fmt.Sprintf("%s/%s", ln.Addr(), ln.Addr().Network()),
-	})
 
 	log.Debugf("bind on %s OK", ln.Addr())
 
@@ -157,7 +162,8 @@ func (h *socks5Handler) serveMuxBind(ctx context.Context, conn net.Conn, ln net.
 
 			t := time.Now()
 			log.Debugf("%s <-> %s", c.LocalAddr(), c.RemoteAddr())
-			xnet.Transport(sc, c)
+			// xnet.Transport(sc, c)
+			xnet.Pipe(ctx, sc, c)
 			log.WithFields(map[string]any{"duration": time.Since(t)}).
 				Debugf("%s >-< %s", c.LocalAddr(), c.RemoteAddr())
 		}(rc)

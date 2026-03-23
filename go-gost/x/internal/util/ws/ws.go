@@ -1,11 +1,13 @@
 package ws
 
 import (
+	"context"
 	"net"
 	"sync"
 	"time"
 
-	xnet "github.com/go-gost/x/internal/net"
+	ctx_pkg "github.com/go-gost/x/ctx"
+	xio "github.com/go-gost/x/internal/io"
 	"github.com/gorilla/websocket"
 )
 
@@ -13,26 +15,31 @@ type WebsocketConn interface {
 	net.Conn
 	WriteMessage(int, []byte) error
 	ReadMessage() (int, []byte, error)
-	xnet.ClientAddr
+	xio.CloseRead
+	xio.CloseWrite
 }
 
 type websocketConn struct {
 	*websocket.Conn
-	rb         []byte
-	clientAddr net.Addr
-	mux        sync.Mutex
+	rb  []byte
+	ctx context.Context
+	mux sync.Mutex
 }
 
 func Conn(conn *websocket.Conn) WebsocketConn {
-	return &websocketConn{
-		Conn: conn,
+	ctx := context.Background()
+	if cc, ok := conn.NetConn().(ctx_pkg.Context); ok {
+		if cv := cc.Context(); cv != nil {
+			ctx = cv
+		}
 	}
+	return ContextConn(ctx, conn)
 }
 
-func ConnWithClientAddr(conn *websocket.Conn, clientAddr net.Addr) WebsocketConn {
+func ContextConn(ctx context.Context, conn *websocket.Conn) WebsocketConn {
 	return &websocketConn{
-		Conn:       conn,
-		clientAddr: clientAddr,
+		Conn: conn,
+		ctx:  ctx,
 	}
 }
 
@@ -77,6 +84,20 @@ func (c *websocketConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
-func (c *websocketConn) ClientAddr() net.Addr {
-	return c.clientAddr
+func (c *websocketConn) CloseRead() error {
+	if sc, ok := c.Conn.NetConn().(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *websocketConn) CloseWrite() error {
+	if sc, ok := c.Conn.NetConn().(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *websocketConn) Context() context.Context {
+	return c.ctx
 }

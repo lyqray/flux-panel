@@ -4,12 +4,16 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"sync"
 	"time"
 
+	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/handler"
+	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/recorder"
+	xctx "github.com/go-gost/x/ctx"
 	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
 )
@@ -65,7 +69,13 @@ func (h *fileHandler) Init(md md.Metadata) (err error) {
 }
 
 func (h *fileHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) error {
+	var clientAddr string
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		clientAddr = srcAddr.String()
+	}
+
 	h.options.Logger.WithFields(map[string]any{
+		"client": clientAddr,
 		"remote": conn.RemoteAddr().String(),
 		"local":  conn.LocalAddr().String(),
 	}).Infof("%s - %s", conn.RemoteAddr(), conn.LocalAddr())
@@ -101,11 +111,15 @@ func (h *fileHandler) handleFunc(w http.ResponseWriter, r *http.Request) {
 		},
 		Time: start,
 	}
-	ro.ClientIP, _, _ = net.SplitHostPort(r.RemoteAddr)
 
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote": r.RemoteAddr,
 	})
+
+	if log.IsLevelEnabled(logger.TraceLevel) {
+		dump, _ := httputil.DumpRequest(r, false)
+		log.Trace(string(dump))
+	}
 
 	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
@@ -128,7 +142,7 @@ func (h *fileHandler) handleFunc(w http.ResponseWriter, r *http.Request) {
 	if auther := h.options.Auther; auther != nil {
 		u, p, _ := r.BasicAuth()
 		ro.ClientID = u
-		if _, ok := auther.Authenticate(r.Context(), u, p); !ok {
+		if _, ok := auther.Authenticate(r.Context(), u, p, auth.WithService(ro.Service)); !ok {
 			w.Header().Set("WWW-Authenticate", "Basic")
 			w.WriteHeader(http.StatusUnauthorized)
 			return

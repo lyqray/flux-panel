@@ -3,19 +3,20 @@ package http3
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"strings"
 	"time"
 
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/hop"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	"github.com/go-gost/x/registry"
 )
 
@@ -58,9 +59,10 @@ func (h *http3Handler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 
 	start := time.Now()
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
+		"network": "udp",
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"sid":     xctx.SidFromContext(ctx).String(),
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 	defer func() {
@@ -73,21 +75,24 @@ func (h *http3Handler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		return nil
 	}
 
-	v, ok := conn.(md.Metadatable)
-	if !ok || v == nil {
-		err := errors.New("wrong connection type")
+	md := ictx.MetadataFromContext(ctx)
+	if md == nil {
+		err := errors.New("http3: wrong connection type")
 		log.Error(err)
 		return err
 	}
-	md := v.Metadata()
-	return h.roundTrip(ctx,
-		md.Get("w").(http.ResponseWriter),
-		md.Get("r").(*http.Request),
-		log,
-	)
+
+	w, _ := md.Get("w").(http.ResponseWriter)
+	r, _ := md.Get("r").(*http.Request)
+
+	return h.roundTrip(ctx, w, r, log)
 }
 
 func (h *http3Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req *http.Request, log logger.Logger) error {
+	if w == nil || req == nil {
+		return nil
+	}
+
 	addr := req.Host
 	if _, port, _ := net.SplitHostPort(addr); port == "" {
 		addr = net.JoinHostPort(strings.Trim(addr, "[]"), "80")
@@ -102,7 +107,7 @@ func (h *http3Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 		w.Header().Set(k, h.md.header.Get(k))
 	}
 
-	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "udp", addr) {
+	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "udp", addr, bypass.WithService(h.options.Service)) {
 		w.WriteHeader(http.StatusForbidden)
 		log.Debug("bypass: ", addr)
 		return nil
@@ -110,7 +115,7 @@ func (h *http3Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 
 	switch h.md.hash {
 	case "host":
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: addr})
 	}
 
 	var target *chain.Node
@@ -124,7 +129,7 @@ func (h *http3Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 	}
 
 	log = log.WithFields(map[string]any{
-		"dst":  fmt.Sprintf("%s/%s", target.Addr, "tcp"),
+		"dst":  target.Addr,
 		"host": target.Addr,
 	})
 

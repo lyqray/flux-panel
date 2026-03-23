@@ -1,22 +1,20 @@
 package http3
 
 import (
+	"context"
 	"errors"
 	"net"
-	"net/http"
+	"sync"
 	"time"
-
-	mdata "github.com/go-gost/core/metadata"
 )
 
 // a dummy HTTP3 server conn used by HTTP3 handler
 type conn struct {
-	md     mdata.Metadata
-	r      *http.Request
-	w      http.ResponseWriter
 	laddr  net.Addr
 	raddr  net.Addr
 	closed chan struct{}
+	ctx    context.Context
+	mu     sync.Mutex
 }
 
 func (c *conn) Read(b []byte) (n int, err error) {
@@ -28,6 +26,9 @@ func (c *conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *conn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	select {
 	case <-c.closed:
 	default:
@@ -60,7 +61,6 @@ func (c *conn) Done() <-chan struct{} {
 	return c.closed
 }
 
-// Metadata implements metadata.Metadatable interface.
-func (c *conn) Metadata() mdata.Metadata {
-	return c.md
+func (c *conn) Context() context.Context {
+	return c.ctx
 }

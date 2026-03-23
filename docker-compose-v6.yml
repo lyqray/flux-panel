@@ -41,7 +41,7 @@ services:
       - gost-network
 
   backend:
-    image: lyqray/springboot-backend:1.4.3
+    image: lyqray/springboot-backend:1.4.3B
     container_name: springboot-backend
     restart: unless-stopped
     environment:
@@ -69,7 +69,7 @@ services:
       start_period: 90s
 
   frontend:
-    image: lyqray/vite-frontend:1.4.3
+    image: lyqray/vite-frontend:1.4.3B
     container_name: vite-frontend
     restart: unless-stopped
     ports:

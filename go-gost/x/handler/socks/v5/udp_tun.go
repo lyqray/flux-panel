@@ -11,7 +11,8 @@ import (
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/gosocks5"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/udp"
 	"github.com/go-gost/x/internal/util/socks"
@@ -22,11 +23,12 @@ import (
 
 func (h *socks5Handler) handleUDPTun(ctx context.Context, conn net.Conn, network, address string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	log = log.WithFields(map[string]any{
-		"cmd": "udp-tun",
+		"network": network,
+		"cmd":     "udp-tun",
 	})
 
 	{
-		clientID := ctxvalue.ClientIDFromContext(ctx)
+		clientID := xctx.ClientIDFromContext(ctx)
 		rw := traffic_wrapper.WrapReadWriter(
 			h.limiter,
 			conn,
@@ -66,7 +68,7 @@ func (h *socks5Handler) handleUDPTun(ctx context.Context, conn net.Conn, network
 
 		// obtain a udp connection
 		var buf bytes.Buffer
-		c, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "udp", "") // UDP association
+		c, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, "") // UDP association
 		ro.Route = buf.String()
 		if err != nil {
 			log.Error(err)
@@ -94,7 +96,7 @@ func (h *socks5Handler) handleUDPTun(ctx context.Context, conn net.Conn, network
 			Netns: h.options.Netns,
 		}
 		var err error
-		pc, err = lc.ListenPacket(ctx, "udp", bindAddr.String())
+		pc, err = lc.ListenPacket(ctx, network, bindAddr.String())
 		if err != nil {
 			log.Error(err)
 			reply := gosocks5.NewReply(gosocks5.Failure, nil)
@@ -102,8 +104,15 @@ func (h *socks5Handler) handleUDPTun(ctx context.Context, conn net.Conn, network
 			reply.Write(conn)
 			return err
 		}
+
 	}
 	defer pc.Close()
+
+	log = log.WithFields(map[string]any{
+		"src":  pc.LocalAddr().String(),
+		"bind": pc.LocalAddr().String(),
+	})
+	ro.SrcAddr = pc.LocalAddr().String()
 
 	saddr := gosocks5.Addr{}
 	saddr.ParseFrom(pc.LocalAddr().String())
@@ -115,7 +124,7 @@ func (h *socks5Handler) handleUDPTun(ctx context.Context, conn net.Conn, network
 	}
 	log.Debugf("bind on %s OK", pc.LocalAddr())
 
-	clientID := ctxvalue.ClientIDFromContext(ctx)
+	clientID := xctx.ClientIDFromContext(ctx)
 	if h.options.Observer != nil {
 		pstats := h.stats.Stats(string(clientID))
 		pstats.Add(stats.KindTotalConns, 1)
@@ -125,7 +134,9 @@ func (h *socks5Handler) handleUDPTun(ctx context.Context, conn net.Conn, network
 	}
 
 	r := udp.NewRelay(socks.UDPTunServerConn(conn), pc).
+		WithService(h.options.Service).
 		WithBypass(h.options.Bypass).
+		WithBufferSize(h.md.udpBufferSize).
 		WithLogger(log)
 
 	t := time.Now()

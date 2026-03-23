@@ -32,21 +32,21 @@ public class GostUtil {
         return WebSocketServer.send_msg(node_id, req, "DeleteLimiters");
     }
 
-    public static GostDto AddService(Long node_id, String name, Integer in_port, Integer limiter, String remoteAddr, Integer fow_type, Tunnel tunnel, String strategy, String interfaceName) {
+    public static GostDto AddService(Long node_id, String name, Integer in_port, Integer limiter, String remoteAddr, Integer fow_type, Tunnel tunnel, String strategy, String interfaceName, Integer proxy_protocol) {
         JSONArray services = new JSONArray();
         String[] protocols = {"tcp", "udp"};
         for (String protocol : protocols) {
-            JSONObject service = createServiceConfig(name, in_port, limiter, remoteAddr, protocol, fow_type, tunnel, strategy, interfaceName);
+            JSONObject service = createServiceConfig(name, in_port, limiter, remoteAddr, protocol, fow_type, tunnel, strategy, interfaceName, proxy_protocol);
             services.add(service);
         }
         return WebSocketServer.send_msg(node_id, services, "AddService");
     }
 
-    public static GostDto UpdateService(Long node_id, String name, Integer in_port, Integer limiter, String remoteAddr, Integer fow_type, Tunnel tunnel, String strategy, String interfaceName) {
+    public static GostDto UpdateService(Long node_id, String name, Integer in_port, Integer limiter, String remoteAddr, Integer fow_type, Tunnel tunnel, String strategy, String interfaceName, Integer proxy_protocol) {
         JSONArray services = new JSONArray();
         String[] protocols = {"tcp", "udp"};
         for (String protocol : protocols) {
-            JSONObject service = createServiceConfig(name, in_port, limiter, remoteAddr, protocol, fow_type, tunnel, strategy, interfaceName);
+            JSONObject service = createServiceConfig(name, in_port, limiter, remoteAddr, protocol, fow_type, tunnel, strategy, interfaceName, proxy_protocol);
             services.add(service);
         }
         return WebSocketServer.send_msg(node_id, services, "UpdateService");
@@ -298,7 +298,7 @@ public class GostUtil {
         return data;
     }
 
-    private static JSONObject createServiceConfig(String name, Integer in_port, Integer limiter, String remoteAddr, String protocol, Integer fow_type, Tunnel tunnel, String strategy, String interfaceName) {
+    private static JSONObject createServiceConfig(String name, Integer in_port, Integer limiter, String remoteAddr, String protocol, Integer fow_type, Tunnel tunnel, String strategy, String interfaceName, Integer proxy_protocol) {
         JSONObject service = new JSONObject();
         service.put("name", name + "_" + protocol);
         if (Objects.equals(protocol, "tcp")){
@@ -313,15 +313,24 @@ public class GostUtil {
             service.put("metadata", metadata);
         }
 
+        // 1. 获取处理器(Handler)
+        JSONObject handler = createHandler(protocol, name, fow_type);
+
+        // 2. 开启 Proxy Protocol
+        if (proxy_protocol != null && proxy_protocol > 0) {
+            JSONObject handlerMetadata = handler.containsKey("metadata") ? handler.getJSONObject("metadata") : new JSONObject();
+            // 核心修改：直接将传入的 1 或 2 转为字符串 "1" 或 "2"
+            handlerMetadata.put("proxyProtocol", proxy_protocol.toString()); 
+            handler.put("metadata", handlerMetadata);
+        }
+
+        // 3. 将处理好的 handler 放入 service
+        service.put("handler", handler);
 
         // 添加限流器配置
         if (limiter != null) {
             service.put("limiter", limiter.toString());
         }
-
-        // 配置处理器
-        JSONObject handler = createHandler(protocol, name, fow_type);
-        service.put("handler", handler);
 
         // 配置监听器
         JSONObject listener = createListener(protocol);

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-gost/core/auth"
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
@@ -27,7 +29,8 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	xbypass "github.com/go-gost/x/bypass"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
@@ -106,15 +109,18 @@ func (h *http2Handler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		LocalAddr:  conn.LocalAddr().String(),
 		Network:    "tcp",
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
+		SID:        xctx.SidFromContext(ctx).String(),
 	}
-	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
+	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 	defer func() {
@@ -133,20 +139,17 @@ func (h *http2Handler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		return rate_limiter.ErrRateLimit
 	}
 
-	v, ok := conn.(md.Metadatable)
-	if !ok || v == nil {
-		err = errors.New("wrong connection type")
+	md := ictx.MetadataFromContext(ctx)
+	if md == nil {
+		err = errors.New("http2: wrong connection type")
 		log.Error(err)
 		return err
 	}
 
-	md := v.Metadata()
-	return h.roundTrip(ctx,
-		md.Get("w").(http.ResponseWriter),
-		md.Get("r").(*http.Request),
-		ro,
-		log,
-	)
+	w, _ := md.Get("w").(http.ResponseWriter)
+	r, _ := md.Get("r").(*http.Request)
+
+	return h.roundTrip(ctx, w, r, ro, log)
 }
 
 func (h *http2Handler) Close() error {
@@ -160,6 +163,10 @@ func (h *http2Handler) Close() error {
 // when server returns an non-200 status code,
 // May be fixed in go1.18.
 func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req *http.Request, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+	if w == nil || req == nil {
+		return nil
+	}
+
 	// Try to get the actual host.
 	// Compatible with GOST 2.x.
 	if v := req.Header.Get("Gost-Target"); v != "" {
@@ -230,9 +237,13 @@ func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 	if !ok {
 		return errors.New("authentication failed")
 	}
-	ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(clientID))
 
-	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", host) {
+	log = log.WithFields(map[string]any{"clientID": clientID})
+	ro.ClientID = clientID
+
+	ctx = xctx.ContextWithClientID(ctx, xctx.ClientID(clientID))
+
+	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", host, bypass.WithService(h.options.Service)) {
 		resp.StatusCode = http.StatusForbidden
 		w.WriteHeader(resp.StatusCode)
 		log.Debug("bypass: ", host)
@@ -247,11 +258,11 @@ func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 
 	switch h.md.hash {
 	case "host":
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: host})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: host})
 	}
 
 	var buf bytes.Buffer
-	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", host)
+	cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "tcp", host)
 	ro.Route = buf.String()
 	if err != nil {
 		log.Error(err)
@@ -261,61 +272,72 @@ func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 	}
 	defer cc.Close()
 
-	if req.Method == http.MethodConnect {
-		resp.StatusCode = http.StatusOK
-		w.WriteHeader(http.StatusOK)
-		if fw, ok := w.(http.Flusher); ok {
-			fw.Flush()
-		}
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
 
-		rw := xio.NewReadWriter(req.Body, flushWriter{w})
-
-		// compatible with HTTP1.x
-		if hj, ok := w.(http.Hijacker); ok && req.ProtoMajor == 1 {
-			// we take over the underly connection
-			conn, _, err := hj.Hijack()
-			if err != nil {
-				log.Error(err)
-				resp.StatusCode = http.StatusInternalServerError
-				w.WriteHeader(http.StatusInternalServerError)
-				return err
-			}
-			defer conn.Close()
-
-			rw = conn
-		}
-
-		rw = traffic_wrapper.WrapReadWriter(
-			h.limiter,
-			rw,
-			clientID,
-			limiter.ScopeOption(limiter.ScopeClient),
-			limiter.ServiceOption(h.options.Service),
-			limiter.NetworkOption("tcp"),
-			limiter.AddrOption(host),
-			limiter.ClientOption(clientID),
-			limiter.SrcOption(req.RemoteAddr),
-		)
-		if h.options.Observer != nil {
-			pstats := h.stats.Stats(clientID)
-			pstats.Add(stats.KindTotalConns, 1)
-			pstats.Add(stats.KindCurrentConns, 1)
-			defer pstats.Add(stats.KindCurrentConns, -1)
-			rw = stats_wrapper.WrapReadWriter(rw, pstats)
-		}
-
+	if req.Method != http.MethodConnect {
 		start := time.Now()
 		log.Infof("%s <-> %s", req.RemoteAddr, host)
-		xnet.Transport(rw, cc)
+		if err := h.forwardRequest(w, req, cc); err != nil {
+			log.Info("%s - %s: %s", req.RemoteAddr, host, err)
+		}
 		log.WithFields(map[string]any{
 			"duration": time.Since(start),
 		}).Infof("%s >-< %s", req.RemoteAddr, host)
+
 		return nil
 	}
 
-	// TODO: forward request
-	resp.StatusCode = http.StatusBadRequest
-	w.WriteHeader(resp.StatusCode)
+	resp.StatusCode = http.StatusOK
+	w.WriteHeader(http.StatusOK)
+	if fw, ok := w.(http.Flusher); ok {
+		fw.Flush()
+	}
+
+	rw := xio.NewReadWriter(req.Body, flushWriter{w})
+
+	// compatible with HTTP1.x
+	if hj, ok := w.(http.Hijacker); ok && req.ProtoMajor == 1 {
+		// we take over the underly connection
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			log.Error(err)
+			resp.StatusCode = http.StatusInternalServerError
+			w.WriteHeader(http.StatusInternalServerError)
+			return err
+		}
+		defer conn.Close()
+
+		rw = conn
+	}
+
+	rw = traffic_wrapper.WrapReadWriter(
+		h.limiter,
+		rw,
+		clientID,
+		limiter.ScopeOption(limiter.ScopeClient),
+		limiter.ServiceOption(h.options.Service),
+		limiter.NetworkOption("tcp"),
+		limiter.AddrOption(host),
+		limiter.ClientOption(clientID),
+		limiter.SrcOption(req.RemoteAddr),
+	)
+	if h.options.Observer != nil {
+		pstats := h.stats.Stats(clientID)
+		pstats.Add(stats.KindTotalConns, 1)
+		pstats.Add(stats.KindCurrentConns, 1)
+		defer pstats.Add(stats.KindCurrentConns, -1)
+		rw = stats_wrapper.WrapReadWriter(rw, pstats)
+	}
+
+	start := time.Now()
+	log.Infof("%s <-> %s", req.RemoteAddr, host)
+	// xnet.Transport(rw, cc)
+	xnet.Pipe(ctx, xio.NewReadWriteCloser(rw, rw, req.Body), cc)
+	log.WithFields(map[string]any{
+		"duration": time.Since(start),
+	}).Infof("%s >-< %s", req.RemoteAddr, host)
 	return nil
 }
 
@@ -363,7 +385,7 @@ func (h *http2Handler) authenticate(ctx context.Context, w http.ResponseWriter, 
 	if h.options.Auther == nil {
 		return "", true
 	}
-	if id, ok = h.options.Auther.Authenticate(ctx, u, p); ok {
+	if id, ok = h.options.Auther.Authenticate(ctx, u, p, auth.WithService(h.options.Service)); ok {
 		return
 	}
 
@@ -446,6 +468,7 @@ func (h *http2Handler) authenticate(ctx context.Context, w http.ResponseWriter, 
 
 	return
 }
+
 func (h *http2Handler) forwardRequest(w http.ResponseWriter, r *http.Request, rw io.ReadWriter) (err error) {
 	if err = r.Write(rw); err != nil {
 		return

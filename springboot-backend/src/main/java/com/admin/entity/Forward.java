@@ -42,4 +42,6 @@ public class Forward extends BaseEntity{
 
     private Integer inx;
 
+    private Integer proxyProtocol;
+
 }

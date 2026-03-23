@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/common/bufpool"
 	"github.com/go-gost/core/handler"
@@ -18,8 +19,9 @@ import (
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	xhop "github.com/go-gost/x/hop"
+	ictx "github.com/go-gost/x/internal/ctx"
 	resolver_util "github.com/go-gost/x/internal/util/resolver"
 	rate_limiter "github.com/go-gost/x/limiter/rate"
 	xstats "github.com/go-gost/x/observer/stats"
@@ -142,24 +144,22 @@ func (h *dnsHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 		Network:    conn.LocalAddr().Network(),
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
+		Host:       conn.LocalAddr().String(),
 		Proto:      "dns",
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
+		SID:        xctx.SidFromContext(ctx).String(),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
@@ -261,7 +261,7 @@ func (h *dnsHandler) request(ctx context.Context, msg []byte, ro *xrecorder.Hand
 	}()
 
 	if h.options.Bypass != nil && mq.Question[0].Qclass == dns.ClassINET {
-		if h.options.Bypass.Contains(context.Background(), "udp", strings.Trim(mq.Question[0].Name, ".")) {
+		if h.options.Bypass.Contains(context.Background(), "udp", strings.Trim(mq.Question[0].Name, "."), bypass.WithService(h.options.Service)) {
 			log.Debug("bypass: ", mq.Question[0].Name)
 			mr = (&dns.Msg{}).SetReply(&mq)
 			b := bufpool.Get(h.md.bufferSize)
@@ -313,7 +313,7 @@ func (h *dnsHandler) request(ctx context.Context, msg []byte, ro *xrecorder.Hand
 	log.Debugf("exchange message %d: %s", mq.Id, mq.Question[0].String())
 
 	var buf bytes.Buffer
-	mr, err := h.exchange(ctxvalue.ContextWithBuffer(ctx, &buf), ex, &mq)
+	mr, err := h.exchange(ictx.ContextWithBuffer(ctx, &buf), ex, &mq)
 	ro.Route = buf.String()
 	if err != nil {
 		return nil, err

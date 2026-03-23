@@ -27,8 +27,8 @@ import (
 	"github.com/go-gost/relay"
 	dissector "github.com/go-gost/tls-dissector"
 	admission "github.com/go-gost/x/admission/wrapper"
-	ctxvalue "github.com/go-gost/x/ctx"
-	ctx_internal "github.com/go-gost/x/internal/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
@@ -70,20 +70,25 @@ func (ep *entrypoint) Handle(ctx context.Context, conn net.Conn) (err error) {
 	defer conn.Close()
 
 	ro := &xrecorder.HandlerRecorderObject{
+		Network:    "tcp",
 		Node:       ep.node,
 		Service:    ep.service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
-		Network:    "tcp",
+		SID:        xctx.SidFromContext(ctx).String(),
 		Time:       time.Now(),
-		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
-	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
+	}
 
 	log := ep.log.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ro.SID,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -127,12 +132,12 @@ func (ep *entrypoint) Handle(ctx context.Context, conn net.Conn) (err error) {
 func (ep *entrypoint) dial(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 	var tunnelID relay.TunnelID
 	if ep.ingress != nil {
-		if rule := ep.ingress.GetRule(ctx, addr); rule != nil {
+		if rule := ep.ingress.GetRule(ctx, addr, ingress.WithService(ep.service)); rule != nil {
 			tunnelID = parseTunnelID(rule.Endpoint)
 		}
 	}
 
-	log := ctxvalue.LoggerFromContext(ctx)
+	log := ictx.LoggerFromContext(ctx)
 	if log == nil {
 		log = ep.log
 	}
@@ -142,7 +147,7 @@ func (ep *entrypoint) dial(ctx context.Context, network, addr string) (conn net.
 		return nil, fmt.Errorf("%w %s", ErrTunnelRoute, addr)
 	}
 
-	ro := ctx_internal.RecorderObjectFromContext(ctx)
+	ro := ictx.RecorderObjectFromContext(ctx)
 	ro.ClientID = tunnelID.String()
 
 	if tunnelID.IsPrivate() {
@@ -170,7 +175,10 @@ func (ep *entrypoint) dial(ctx context.Context, network, addr string) (conn net.
 	if node == ep.node {
 		ro.Redirect = ""
 
-		clientAddr := ctxvalue.ClientAddrFromContext(ctx)
+		var clientAddr string
+		if addr := xctx.SrcAddrFromContext(ctx); addr != nil {
+			clientAddr = addr.String()
+		}
 		var features []relay.Feature
 		af := &relay.AddrFeature{}
 		af.ParseFrom(string(clientAddr))
@@ -224,7 +232,7 @@ func (ep *entrypoint) handleHTTP(ctx context.Context, conn net.Conn, ro *xrecord
 
 	ro.Time = time.Time{}
 
-	if err := ep.httpRoundTrip(ctx, xio.NewReadWriter(br, conn), req, ro, &pStats, log); err != nil {
+	if err := ep.httpRoundTrip(ctx, xio.NewReadWriteCloser(br, conn, conn), req, ro, &pStats, log); err != nil {
 		log.Error(err)
 		return err
 	}
@@ -245,13 +253,13 @@ func (ep *entrypoint) handleHTTP(ctx context.Context, conn net.Conn, ro *xrecord
 			log.Trace(string(dump))
 		}
 
-		if err := ep.httpRoundTrip(ctx, xio.NewReadWriter(br, conn), req, ro, &pStats, log); err != nil {
+		if err := ep.httpRoundTrip(ctx, xio.NewReadWriteCloser(br, conn, conn), req, ro, &pStats, log); err != nil {
 			return err
 		}
 	}
 }
 
-func (ep *entrypoint) httpRoundTrip(ctx context.Context, rw io.ReadWriter, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (err error) {
+func (ep *entrypoint) httpRoundTrip(ctx context.Context, rw io.ReadWriteCloser, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (err error) {
 	ro2 := &xrecorder.HandlerRecorderObject{}
 	*ro2 = *ro
 	ro = ro2
@@ -311,17 +319,6 @@ func (ep *entrypoint) httpRoundTrip(ctx context.Context, rw io.ReadWriter, req *
 		},
 	}
 
-	if clientIP := xhttp.GetClientIP(req); clientIP != nil {
-		ro.ClientIP = clientIP.String()
-	}
-
-	clientAddr := ro.RemoteAddr
-	if ro.ClientIP != "" {
-		if _, port, _ := net.SplitHostPort(ro.RemoteAddr); port != "" {
-			clientAddr = net.JoinHostPort(ro.ClientIP, port)
-		}
-	}
-
 	res := &http.Response{
 		ProtoMajor: req.ProtoMajor,
 		ProtoMinor: req.ProtoMinor,
@@ -345,9 +342,13 @@ func (ep *entrypoint) httpRoundTrip(ctx context.Context, rw io.ReadWriter, req *
 		}
 	}
 
-	ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(clientAddr))
-	ctx = ctx_internal.ContextWithRecorderObject(ctx, ro)
-	ctx = ctxvalue.ContextWithLogger(ctx, log)
+	if clientIP := xhttp.GetClientIP(req); clientIP != nil {
+		ro.ClientIP = clientIP.String()
+		ctx = xctx.ContextWithSrcAddr(ctx, (&net.TCPAddr{IP: clientIP}))
+	}
+
+	ctx = ictx.ContextWithRecorderObject(ctx, ro)
+	ctx = ictx.ContextWithLogger(ctx, log)
 
 	resp, err := ep.transport.RoundTrip(req.WithContext(ctx))
 
@@ -413,7 +414,7 @@ func upgradeType(h http.Header) string {
 	return h.Get("Upgrade")
 }
 
-func (ep *entrypoint) handleUpgradeResponse(ctx context.Context, rw io.ReadWriter, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (ep *entrypoint) handleUpgradeResponse(ctx context.Context, rw io.ReadWriteCloser, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	reqUpType := upgradeType(req.Header)
 	resUpType := upgradeType(res.Header)
 	if !strings.EqualFold(reqUpType, resUpType) {
@@ -435,7 +436,8 @@ func (ep *entrypoint) handleUpgradeResponse(ctx context.Context, rw io.ReadWrite
 		return ep.sniffingWebsocketFrame(ctx, rw, backConn, ro, log)
 	}
 
-	return xnet.Transport(rw, backConn)
+	// return xnet.Transport(rw, backConn)
+	return xnet.Pipe(ctx, rw, backConn)
 }
 
 func (ep *entrypoint) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
@@ -579,9 +581,9 @@ func (ep *entrypoint) HandleTLS(ctx context.Context, conn net.Conn, ro *xrecorde
 		ro.Host = host
 	}
 
-	ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(ro.RemoteAddr))
-	ctx = ctx_internal.ContextWithRecorderObject(ctx, ro)
-	ctx = ctxvalue.ContextWithLogger(ctx, log)
+	// ctx = xctx.ContextWithClientAddr(ctx, xctx.ClientAddr(ro.RemoteAddr))
+	ctx = ictx.ContextWithRecorderObject(ctx, ro)
+	ctx = ictx.ContextWithLogger(ctx, log)
 
 	cc, err := ep.dial(ctx, "tcp", host)
 	if err != nil {
@@ -616,7 +618,8 @@ func (ep *entrypoint) HandleTLS(ctx context.Context, conn net.Conn, ro *xrecorde
 		return err
 	}
 
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	return err
 }
 
@@ -698,7 +701,8 @@ func (ep *entrypoint) handleConnect(ctx context.Context, conn net.Conn, ro *xrec
 
 	t := time.Now()
 	log.Debugf("%s <-> %s", conn.RemoteAddr(), cc.RemoteAddr())
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Debugf("%s >-< %s", conn.RemoteAddr(), cc.RemoteAddr())
@@ -727,7 +731,7 @@ func (l *tcpListener) Init(md md.Metadata) (err error) {
 	ln := l.ln
 	ln = proxyproto.WrapListener(l.options.ProxyProtocol, ln, 10*time.Second)
 	ln = metrics.WrapListener(l.options.Service, ln)
-	ln = admission.WrapListener(l.options.Admission, ln)
+	ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
 	ln = climiter.WrapListener(l.options.ConnLimiter, ln)
 	l.ln = ln
 

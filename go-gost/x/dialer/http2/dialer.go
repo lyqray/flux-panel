@@ -10,7 +10,10 @@ import (
 	"github.com/go-gost/core/dialer"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	net_dialer "github.com/go-gost/x/internal/net/dialer"
+	"github.com/go-gost/x/internal/net/proxyproto"
 	mdx "github.com/go-gost/x/metadata"
 	"github.com/go-gost/x/registry"
 )
@@ -23,7 +26,6 @@ type http2Dialer struct {
 	clients     map[string]*http.Client
 	clientMutex sync.Mutex
 	logger      logger.Logger
-	md          metadata
 	options     dialer.Options
 }
 
@@ -91,7 +93,18 @@ func (d *http2Dialer) Dial(ctx context.Context, address string, opts ...dialer.D
 					if netd == nil {
 						netd = net_dialer.DefaultNetDialer
 					}
-					return netd.Dial(ctx, network, addr)
+					conn, err := netd.Dial(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+
+					conn = proxyproto.WrapClientConn(
+						d.options.ProxyProtocol,
+						xctx.SrcAddrFromContext(ctx),
+						xctx.DstAddrFromContext(ctx),
+						conn)
+
+					return conn, nil
 				},
 				ForceAttemptHTTP2:     true,
 				MaxIdleConns:          16,
@@ -103,7 +116,7 @@ func (d *http2Dialer) Dial(ctx context.Context, address string, opts ...dialer.D
 		d.clients[address] = client
 	}
 
-	var c net.Conn = &conn{
+	return &conn{
 		localAddr:  &net.TCPAddr{},
 		remoteAddr: raddr,
 		onClose: func() {
@@ -111,8 +124,6 @@ func (d *http2Dialer) Dial(ctx context.Context, address string, opts ...dialer.D
 			defer d.clientMutex.Unlock()
 			delete(d.clients, address)
 		},
-		md: mdx.NewMetadata(map[string]any{"client": client}),
-	}
-
-	return c, nil
+		ctx: ictx.ContextWithMetadata(ctx, mdx.NewMetadata(map[string]any{"client": client})),
+	}, nil
 }

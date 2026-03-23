@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	xio "github.com/go-gost/x/internal/io"
 	"github.com/vishvananda/netns"
 )
 
@@ -118,4 +119,18 @@ func (c *readWriteConn) Read(p []byte) (int, error) {
 
 func (c *readWriteConn) Write(p []byte) (int, error) {
 	return c.w.Write(p)
+}
+
+func (c *readWriteConn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *readWriteConn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
 }

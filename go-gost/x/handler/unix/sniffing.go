@@ -18,7 +18,7 @@ import (
 	dissector "github.com/go-gost/tls-dissector"
 	xbypass "github.com/go-gost/x/bypass"
 	xio "github.com/go-gost/x/internal/io"
-	netpkg "github.com/go-gost/x/internal/net"
+	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
 	tls_util "github.com/go-gost/x/internal/util/tls"
 	xrecorder "github.com/go-gost/x/recorder"
@@ -28,7 +28,7 @@ const (
 	defaultBodySize = 1024 * 1024 // 1MB
 )
 
-func (h *unixHandler) handleHTTP(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (h *unixHandler) handleHTTP(ctx context.Context, rw, cc io.ReadWriteCloser, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	br := bufio.NewReader(rw)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -51,7 +51,9 @@ func (h *unixHandler) handleHTTP(ctx context.Context, rw, cc io.ReadWriter, ro *
 	})
 
 	if h.options.Bypass != nil &&
-		h.options.Bypass.Contains(ctx, "tcp", host, bypass.WithPathOption(req.RequestURI)) {
+		h.options.Bypass.Contains(ctx, "tcp", host,
+			bypass.WithService(h.options.Service),
+			bypass.WithPathOption(req.RequestURI)) {
 		log.Debugf("bypass: %s %s", host, req.RequestURI)
 		return xbypass.ErrBypass
 	}
@@ -81,7 +83,7 @@ func (h *unixHandler) handleHTTP(ctx context.Context, rw, cc io.ReadWriter, ro *
 	}
 }
 
-func (h *unixHandler) httpRoundTrip(ctx context.Context, rw, cc io.ReadWriter, req *http.Request, ro *xrecorder.HandlerRecorderObject, log logger.Logger) (close bool, err error) {
+func (h *unixHandler) httpRoundTrip(ctx context.Context, rw, cc io.ReadWriteCloser, req *http.Request, ro *xrecorder.HandlerRecorderObject, log logger.Logger) (close bool, err error) {
 	close = true
 
 	if req == nil {
@@ -199,13 +201,14 @@ func (h *unixHandler) httpRoundTrip(ctx context.Context, rw, cc io.ReadWriter, r
 	}
 
 	if req.Header.Get("Upgrade") == "websocket" {
-		netpkg.Transport(rw, cc)
+		// xnet.Transport(rw, cc)
+		xnet.Pipe(ctx, rw, cc)
 	}
 
 	return resp.Close, nil
 }
 
-func (h *unixHandler) handleTLS(_ context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (h *unixHandler) handleTLS(ctx context.Context, rw, cc io.ReadWriteCloser, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	buf := new(bytes.Buffer)
 
 	clientHello, err := dissector.ParseClientHello(io.TeeReader(rw, buf))
@@ -250,7 +253,8 @@ func (h *unixHandler) handleTLS(_ context.Context, rw, cc io.ReadWriter, ro *xre
 
 	t := time.Now()
 	log.Infof("%s <-> %s", ro.RemoteAddr, ro.Host)
-	netpkg.Transport(rw, cc)
+	// xnet.Transport(rw, cc)
+	xnet.Pipe(ctx, rw, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", ro.RemoteAddr, ro.Host)

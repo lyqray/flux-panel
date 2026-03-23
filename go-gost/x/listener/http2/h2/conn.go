@@ -1,10 +1,12 @@
 package h2
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,6 +17,8 @@ type conn struct {
 	remoteAddr net.Addr
 	localAddr  net.Addr
 	closed     chan struct{}
+	ctx        context.Context
+	mu         sync.Mutex
 }
 
 func (c *conn) Read(b []byte) (n int, err error) {
@@ -26,12 +30,17 @@ func (c *conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *conn) Close() (err error) {
+	c.mu.Lock()
+
 	select {
 	case <-c.closed:
+		c.mu.Unlock()
 		return
 	default:
 		close(c.closed)
 	}
+	c.mu.Unlock()
+
 	if rc, ok := c.r.(io.Closer); ok {
 		err = rc.Close()
 	}
@@ -59,6 +68,10 @@ func (c *conn) SetReadDeadline(t time.Time) error {
 
 func (c *conn) SetWriteDeadline(t time.Time) error {
 	return &net.OpError{Op: "set", Net: "http2", Source: nil, Addr: nil, Err: errors.New("deadline not supported")}
+}
+
+func (c *conn) Context() context.Context {
+	return c.ctx
 }
 
 type flushWriter struct {

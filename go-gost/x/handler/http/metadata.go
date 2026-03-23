@@ -25,6 +25,7 @@ type metadata struct {
 	compression     bool
 	probeResistance *probeResistance
 	enableUDP       bool
+	udpBufferSize   int
 	header          http.Header
 	hash            string
 	authBasicRealm  string
@@ -49,8 +50,11 @@ type metadata struct {
 
 func (h *httpHandler) parseMetadata(md mdata.Metadata) error {
 	h.md.readTimeout = mdutil.GetDuration(md, "readTimeout")
-	if h.md.readTimeout <= 0 {
+	if h.md.readTimeout == 0 {
 		h.md.readTimeout = 15 * time.Second
+	}
+	if h.md.readTimeout < 0 {
+		h.md.readTimeout = 0
 	}
 
 	if m := mdutil.GetStringMapString(md, "http.header", "header"); len(m) > 0 {
@@ -74,6 +78,7 @@ func (h *httpHandler) parseMetadata(md mdata.Metadata) error {
 		}
 	}
 	h.md.enableUDP = mdutil.GetBool(md, "udp")
+	h.md.udpBufferSize = mdutil.GetInt(md, "udp.bufferSize", "udpBufferSize")
 	h.md.hash = mdutil.GetString(md, "hash")
 	h.md.authBasicRealm = mdutil.GetString(md, "authBasicRealm")
 

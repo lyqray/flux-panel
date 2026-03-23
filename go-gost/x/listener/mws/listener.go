@@ -2,7 +2,6 @@ package mws
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -13,9 +12,12 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	admission "github.com/go-gost/x/admission/wrapper"
+	xctx "github.com/go-gost/x/ctx"
 	xnet "github.com/go-gost/x/internal/net"
+	xhttp "github.com/go-gost/x/internal/net/http"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/internal/util/mux"
+	xtls "github.com/go-gost/x/internal/util/tls"
 	ws_util "github.com/go-gost/x/internal/util/ws"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -37,7 +39,7 @@ type mwsListener struct {
 	cqueue     chan net.Conn
 	errChan    chan error
 	tlsEnabled bool
-	logger     logger.Logger
+	log        logger.Logger
 	md         metadata
 	options    listener.Options
 }
@@ -48,7 +50,7 @@ func NewListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &mwsListener{
-		logger:  options.Logger,
+		log:     options.Logger,
 		options: options,
 	}
 }
@@ -60,7 +62,7 @@ func NewTLSListener(opts ...listener.Option) listener.Listener {
 	}
 	return &mwsListener{
 		tlsEnabled: true,
-		logger:     options.Logger,
+		log:        options.Logger,
 		options:    options,
 	}
 }
@@ -101,7 +103,7 @@ func (l *mwsListener) Init(md md.Metadata) (err error) {
 	lc := net.ListenConfig{}
 	if l.md.mptcp {
 		lc.SetMultipathTCP(true)
-		l.logger.Debugf("mptcp enabled: %v", lc.MultipathTCP())
+		l.log.Debugf("mptcp enabled: %v", lc.MultipathTCP())
 	}
 	ln, err := lc.Listen(context.Background(), network, l.options.Addr)
 	if err != nil {
@@ -110,12 +112,12 @@ func (l *mwsListener) Init(md md.Metadata) (err error) {
 	ln = proxyproto.WrapListener(l.options.ProxyProtocol, ln, 10*time.Second)
 	ln = metrics.WrapListener(l.options.Service, ln)
 	ln = stats.WrapListener(ln, l.options.Stats)
-	ln = admission.WrapListener(l.options.Admission, ln)
+	ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
 	ln = limiter_wrapper.WrapListener(l.options.Service, ln, l.options.TrafficLimiter)
 	ln = climiter.WrapListener(l.options.ConnLimiter, ln)
 
 	if l.tlsEnabled {
-		ln = tls.NewListener(ln, l.options.TLSConfig)
+		ln = xtls.NewListener(ln, l.options.TLSConfig)
 	}
 
 	l.addr = ln.Addr()
@@ -162,23 +164,39 @@ func (l *mwsListener) Addr() net.Addr {
 }
 
 func (l *mwsListener) upgrade(w http.ResponseWriter, r *http.Request) {
-	log := l.logger.WithFields(map[string]any{
+	clientIP := xhttp.GetClientIP(r)
+	cip := ""
+	if clientIP != nil {
+		cip = clientIP.String()
+	}
+	log := l.log.WithFields(map[string]any{
 		"local":  l.addr.String(),
 		"remote": r.RemoteAddr,
+		"client": cip,
 	})
-	if l.logger.IsLevelEnabled(logger.TraceLevel) {
+	if log.IsLevelEnabled(logger.TraceLevel) {
 		dump, _ := httputil.DumpRequest(r, false)
 		log.Trace(string(dump))
 	}
 
 	conn, err := l.upgrader.Upgrade(w, r, l.md.header)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
 		log.Error(err)
 		return
 	}
 
-	l.mux(ws_util.Conn(conn), log)
+	ctx := r.Context()
+	if cc, ok := conn.NetConn().(xctx.Context); ok {
+		if cv := cc.Context(); cv != nil {
+			ctx = cv
+		}
+	}
+
+	if clientIP != nil {
+		ctx = xctx.ContextWithSrcAddr(ctx, &net.TCPAddr{IP: clientIP})
+	}
+
+	l.mux(ws_util.ContextConn(ctx, conn), log)
 }
 
 func (l *mwsListener) mux(conn net.Conn, log logger.Logger) {
