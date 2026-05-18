@@ -1,9 +1,11 @@
 package mux
 
 import (
+	"context"
 	"net"
 	"time"
 
+	"github.com/go-gost/x/ctx"
 	smux "github.com/xtaci/smux"
 )
 
@@ -145,4 +147,11 @@ func (c *streamConn) Write(b []byte) (n int, err error) {
 
 func (c *streamConn) Close() error {
 	return c.stream.Close()
+}
+
+func (c *streamConn) Context() context.Context {
+	if sc, ok := c.Conn.(ctx.Context); ok {
+		return sc.Context()
+	}
+	return nil
 }

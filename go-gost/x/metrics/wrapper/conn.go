@@ -1,13 +1,15 @@
 package wrapper
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"syscall"
 
-	"github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/metrics"
+	"github.com/go-gost/x/ctx"
+	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/udp"
 	xmetrics "github.com/go-gost/x/metrics"
@@ -25,7 +27,7 @@ type serverConn struct {
 }
 
 func WrapConn(service string, c net.Conn) net.Conn {
-	if !xmetrics.IsEnabled() || c == nil {
+	if c == nil {
 		return c
 	}
 
@@ -73,9 +75,23 @@ func (c *serverConn) SyscallConn() (rc syscall.RawConn, err error) {
 	return
 }
 
-func (c *serverConn) Metadata() metadata.Metadata {
-	if md, ok := c.Conn.(metadata.Metadatable); ok {
-		return md.Metadata()
+func (c *serverConn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *serverConn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *serverConn) Context() context.Context {
+	if innerCtx, ok := c.Conn.(ctx.Context); ok {
+		return innerCtx.Context()
 	}
 	return nil
 }
@@ -86,7 +102,7 @@ type packetConn struct {
 }
 
 func WrapPacketConn(service string, pc net.PacketConn) net.PacketConn {
-	if !xmetrics.IsEnabled() {
+	if pc == nil {
 		return pc
 	}
 	return &packetConn{
@@ -133,9 +149,9 @@ func (c *packetConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	return
 }
 
-func (c *packetConn) Metadata() metadata.Metadata {
-	if md, ok := c.PacketConn.(metadata.Metadatable); ok {
-		return md.Metadata()
+func (c *packetConn) Context() context.Context {
+	if innerCtx, ok := c.PacketConn.(ctx.Context); ok {
+		return innerCtx.Context()
 	}
 	return nil
 }
@@ -364,9 +380,9 @@ func (c *udpConn) SetDSCP(n int) error {
 	return nil
 }
 
-func (c *udpConn) Metadata() metadata.Metadata {
-	if md, ok := c.PacketConn.(metadata.Metadatable); ok {
-		return md.Metadata()
+func (c *udpConn) Context() context.Context {
+	if innerCtx, ok := c.PacketConn.(ctx.Context); ok {
+		return innerCtx.Context()
 	}
 	return nil
 }

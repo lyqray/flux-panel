@@ -9,7 +9,7 @@ import (
 	"github.com/go-gost/core/connector"
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/relay"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/registry"
 )
 
@@ -39,11 +39,11 @@ func (c *tunnelConnector) Init(md md.Metadata) (err error) {
 
 func (c *tunnelConnector) Connect(ctx context.Context, conn net.Conn, network, address string, opts ...connector.ConnectOption) (net.Conn, error) {
 	log := c.options.Logger.WithFields(map[string]any{
-		"remote":  conn.RemoteAddr().String(),
-		"local":   conn.LocalAddr().String(),
 		"network": network,
 		"address": address,
-		"sid":     string(ctxvalue.SidFromContext(ctx)),
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"sid":     xctx.SidFromContext(ctx).String(),
 	})
 	log.Debugf("connect %s/%s", address, network)
 
@@ -73,9 +73,9 @@ func (c *tunnelConnector) Connect(ctx context.Context, conn net.Conn, network, a
 		})
 	}
 
-	srcAddr := conn.LocalAddr().String()
-	if v := ctxvalue.ClientAddrFromContext(ctx); v != "" {
-		srcAddr = string(v)
+	srcAddr := conn.RemoteAddr().String()
+	if v := xctx.SrcAddrFromContext(ctx); v != nil {
+		srcAddr = v.String()
 	}
 
 	af := &relay.AddrFeature{}

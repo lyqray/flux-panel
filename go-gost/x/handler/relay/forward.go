@@ -1,9 +1,9 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"time"
 
@@ -12,12 +12,14 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/relay"
 	ctxvalue "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/limiter/traffic/wrapper"
 	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
+	xrecorder "github.com/go-gost/x/recorder"
 )
 
-func (h *relayHandler) handleForward(ctx context.Context, conn net.Conn, network string, log logger.Logger) error {
+func (h *relayHandler) handleForward(ctx context.Context, conn net.Conn, network string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	resp := relay.Response{
 		Version: relay.Version1,
 		Status:  relay.StatusOK,
@@ -32,7 +34,7 @@ func (h *relayHandler) handleForward(ctx context.Context, conn net.Conn, network
 	}
 
 	log = log.WithFields(map[string]any{
-		"dst": fmt.Sprintf("%s/%s", target.Addr, network),
+		"dst": target.Addr,
 		"cmd": "forward",
 	})
 
@@ -61,7 +63,9 @@ func (h *relayHandler) handleForward(ctx context.Context, conn net.Conn, network
 		conn = xnet.NewReadWriteConn(rw, rw, conn)
 	}
 
-	cc, err := h.options.Router.Dial(ctx, network, target.Addr)
+	var buf bytes.Buffer
+	cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, target.Addr)
+	ro.Route = buf.String()
 	if err != nil {
 		// TODO: the router itself may be failed due to the failed node in the router,
 		// the dead marker may be a wrong operation.
@@ -76,6 +80,11 @@ func (h *relayHandler) handleForward(ctx context.Context, conn net.Conn, network
 		return err
 	}
 	defer cc.Close()
+
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
+
 	if marker := target.Marker(); marker != nil {
 		marker.Reset()
 	}
@@ -114,7 +123,8 @@ func (h *relayHandler) handleForward(ctx context.Context, conn net.Conn, network
 
 	t := time.Now()
 	log.Debugf("%s <-> %s", conn.RemoteAddr(), target.Addr)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Debugf("%s >-< %s", conn.RemoteAddr(), target.Addr)

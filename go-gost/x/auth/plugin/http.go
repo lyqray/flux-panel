@@ -8,11 +8,12 @@ import (
 
 	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/logger"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/internal/plugin"
 )
 
 type httpPluginRequest struct {
+	Service  string `json:"service"`
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Client   string `json:"client"`
@@ -53,10 +54,21 @@ func (p *httpPlugin) Authenticate(ctx context.Context, user, password string, op
 		return
 	}
 
+	var options auth.Options
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	var clientAddr string
+	if v := xctx.SrcAddrFromContext(ctx); v != nil {
+		clientAddr = v.String()
+	}
+
 	rb := httpPluginRequest{
+		Service:  options.Service,
 		Username: user,
 		Password: password,
-		Client:   string(ctxvalue.ClientAddrFromContext(ctx)),
+		Client:   clientAddr,
 	}
 	v, err := json.Marshal(&rb)
 	if err != nil {

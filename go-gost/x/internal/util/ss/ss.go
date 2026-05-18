@@ -4,32 +4,14 @@ import (
 	"bytes"
 	"net"
 
+	xio "github.com/go-gost/x/internal/io"
 	"github.com/shadowsocks/go-shadowsocks2/core"
-	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
 )
-
-type shadowCipher struct {
-	cipher *ss.Cipher
-}
-
-func (c *shadowCipher) StreamConn(conn net.Conn) net.Conn {
-	return ss.NewConn(conn, c.cipher.Copy())
-}
-
-func (c *shadowCipher) PacketConn(conn net.PacketConn) net.PacketConn {
-	return ss.NewSecurePacketConn(conn, c.cipher.Copy())
-}
 
 func ShadowCipher(method, password string, key string) (core.Cipher, error) {
 	if method == "" || password == "" {
 		return nil, nil
 	}
-
-	c, _ := ss.NewCipher(method, password)
-	if c != nil {
-		return &shadowCipher{cipher: c}, nil
-	}
-
 	return core.PickCipher(method, []byte(key), password)
 }
 
@@ -58,4 +40,18 @@ func (c *shadowConn) Write(b []byte) (n int, err error) {
 	}
 	_, err = c.Conn.Write(b)
 	return
+}
+
+func (c *shadowConn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *shadowConn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
 }

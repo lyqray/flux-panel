@@ -10,6 +10,7 @@ import (
 	"github.com/go-gost/core/logger"
 	mdata "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/router"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	traffic_limiter "github.com/go-gost/x/limiter/traffic"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -27,7 +28,7 @@ type tunListener struct {
 	addr    net.Addr
 	cqueue  chan net.Conn
 	closed  chan struct{}
-	logger  logger.Logger
+	log     logger.Logger
 	md      metadata
 	options listener.Options
 	routes  []*router.Route
@@ -39,7 +40,7 @@ func NewListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &tunListener{
-		logger:  options.Logger,
+		log:     options.Logger,
 		options: options,
 	}
 }
@@ -57,15 +58,21 @@ func (l *tunListener) Init(md mdata.Metadata) (err error) {
 	if err != nil {
 		return
 	}
-	l.cqueue = make(chan net.Conn)
+	l.cqueue = make(chan net.Conn, 1)
 	l.closed = make(chan struct{})
 
-	go l.listenLoop()
+	ctx, done := context.WithCancelCause(context.Background())
+	go l.listenLoop(done)
+
+	<-ctx.Done()
+	if err := context.Cause(ctx); err != ctx.Err() {
+		return err
+	}
 
 	return
 }
 
-func (l *tunListener) listenLoop() {
+func (l *tunListener) listenLoop(ready context.CancelCauseFunc) {
 	for {
 		ctx, cancel := context.WithCancel(context.Background())
 		err := func() error {
@@ -83,14 +90,19 @@ func (l *tunListener) listenLoop() {
 			}
 
 			addrs, _ := itf.Addrs()
-			l.logger.Infof("name: %s, net: %s, mtu: %d, addrs: %s",
-				itf.Name, ip, itf.MTU, addrs)
+			l.log.Infof("name: %s, net: %s, mtu: %d, addrs: %s",
+				itf.Name, ip, l.md.config.MTU, addrs)
+
+			ctx = ictx.ContextWithMetadata(ctx, mdx.NewMetadata(map[string]any{
+				"config": l.md.config,
+			}))
 
 			var c net.Conn
 			c = &conn{
 				ifce:   ifce,
 				laddr:  l.addr,
 				raddr:  &net.IPAddr{IP: ip},
+				ctx:    ctx,
 				cancel: cancel,
 			}
 			c = metrics.WrapConn(l.options.Service, c)
@@ -103,18 +115,17 @@ func (l *tunListener) listenLoop() {
 				limiter.ServiceOption(l.options.Service),
 				limiter.NetworkOption(c.LocalAddr().Network()),
 			)
-			c = withMetadata(mdx.NewMetadata(map[string]any{
-				"config": l.md.config,
-			}), c)
 
 			l.cqueue <- c
 
 			return nil
 		}()
 		if err != nil {
-			l.logger.Error(err)
+			l.log.Error(err)
 			cancel()
 		}
+
+		ready(err)
 
 		select {
 		case <-ctx.Done():

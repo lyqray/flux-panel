@@ -14,7 +14,9 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	admission "github.com/go-gost/x/admission/wrapper"
+	xctx "github.com/go-gost/x/ctx"
 	xnet "github.com/go-gost/x/internal/net"
+	xhttp "github.com/go-gost/x/internal/net/http"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -35,7 +37,7 @@ type h2Listener struct {
 	addr    net.Addr
 	cqueue  chan net.Conn
 	errChan chan error
-	logger  logger.Logger
+	log     logger.Logger
 	md      metadata
 	h2c     bool
 	options listener.Options
@@ -48,7 +50,7 @@ func NewListener(opts ...listener.Option) listener.Listener {
 	}
 	return &h2Listener{
 		h2c:     true,
-		logger:  options.Logger,
+		log:     options.Logger,
 		options: options,
 	}
 }
@@ -59,7 +61,7 @@ func NewTLSListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &h2Listener{
-		logger:  options.Logger,
+		log:     options.Logger,
 		options: options,
 	}
 }
@@ -71,6 +73,21 @@ func (l *h2Listener) Init(md md.Metadata) (err error) {
 
 	l.server = &http.Server{
 		Addr: l.options.Addr,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if tlsConn, ok := c.(*tls.Conn); ok {
+				if cc, ok := tlsConn.NetConn().(xctx.Context); ok {
+					if cv := cc.Context(); cv != nil {
+						return cv
+					}
+				}
+			}
+			if cc, ok := c.(xctx.Context); ok {
+				if cv := cc.Context(); cv != nil {
+					return cv
+				}
+			}
+			return ctx
+		},
 	}
 
 	network := "tcp"
@@ -80,7 +97,7 @@ func (l *h2Listener) Init(md md.Metadata) (err error) {
 	lc := net.ListenConfig{}
 	if l.md.mptcp {
 		lc.SetMultipathTCP(true)
-		l.logger.Debugf("mptcp enabled: %v", lc.MultipathTCP())
+		l.log.Debugf("mptcp enabled: %v", lc.MultipathTCP())
 	}
 	ln, err := lc.Listen(context.Background(), network, l.options.Addr)
 	if err != nil {
@@ -90,7 +107,7 @@ func (l *h2Listener) Init(md md.Metadata) (err error) {
 	ln = proxyproto.WrapListener(l.options.ProxyProtocol, ln, 10*time.Second)
 	ln = metrics.WrapListener(l.options.Service, ln)
 	ln = stats.WrapListener(ln, l.options.Stats)
-	ln = admission.WrapListener(l.options.Admission, ln)
+	ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
 	ln = limiter_wrapper.WrapListener(l.options.Service, ln, l.options.TrafficLimiter)
 	ln = climiter.WrapListener(l.options.ConnLimiter, ln)
 
@@ -112,7 +129,7 @@ func (l *h2Listener) Init(md md.Metadata) (err error) {
 
 	go func() {
 		if err := l.server.Serve(ln); err != nil {
-			l.logger.Error(err)
+			l.log.Error(err)
 		}
 	}()
 
@@ -149,27 +166,37 @@ func (l *h2Listener) Close() (err error) {
 	case <-l.errChan:
 	default:
 		err = l.server.Close()
-		l.errChan <- err
+		l.errChan <- http.ErrServerClosed
 		close(l.errChan)
 	}
-	return nil
+	return
 }
 
 func (l *h2Listener) handleFunc(w http.ResponseWriter, r *http.Request) {
-	if l.logger.IsLevelEnabled(logger.TraceLevel) {
+	clientIP := xhttp.GetClientIP(r)
+	cip := ""
+	if clientIP != nil {
+		cip = clientIP.String()
+	}
+	log := l.log.WithFields(map[string]any{
+		"local":  l.addr.String(),
+		"remote": r.RemoteAddr,
+		"client": cip,
+	})
+	if log.IsLevelEnabled(logger.TraceLevel) {
 		dump, _ := httputil.DumpRequest(r, false)
-		l.logger.Trace(string(dump))
+		log.Trace(string(dump))
 	}
 	conn, err := l.upgrade(w, r)
 	if err != nil {
-		l.logger.Error(err)
+		l.log.Error(err)
 		return
 	}
 	select {
 	case l.cqueue <- conn:
 	default:
 		conn.Close()
-		l.logger.Warnf("connection queue is full, client %s discarded", r.RemoteAddr)
+		l.log.Warnf("connection queue is full, client %s discarded", r.RemoteAddr)
 	}
 
 	<-conn.closed // NOTE: we need to wait for streaming end, or the connection will be closed
@@ -194,15 +221,21 @@ func (l *h2Listener) upgrade(w http.ResponseWriter, r *http.Request) (*conn, err
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
 	if remoteAddr == nil {
 		remoteAddr = &net.TCPAddr{
-			IP:   net.IPv4zero,
-			Port: 0,
+			IP: net.IPv4zero,
 		}
 	}
+
+	ctx := r.Context()
+	if clientIP := xhttp.GetClientIP(r); clientIP != nil {
+		ctx = xctx.ContextWithSrcAddr(ctx, &net.TCPAddr{IP: clientIP})
+	}
+
 	return &conn{
 		r:          r.Body,
 		w:          flushWriter{w},
 		localAddr:  l.addr,
 		remoteAddr: remoteAddr,
 		closed:     make(chan struct{}),
+		ctx:        ctx,
 	}, nil
 }

@@ -14,10 +14,12 @@ import (
 )
 
 type metadata struct {
+	publicAddr        string
 	readTimeout       time.Duration
 	noTLS             bool
 	enableBind        bool
 	enableUDP         bool
+	udpBufferSize     int
 	compatibilityMode bool
 	hash              string
 	muxCfg            *mux.Config
@@ -40,6 +42,7 @@ type metadata struct {
 }
 
 func (h *socks5Handler) parseMetadata(md mdata.Metadata) (err error) {
+	h.md.publicAddr = mdutil.GetString(md, "socks.publicAddr", "publicAddr")
 	h.md.readTimeout = mdutil.GetDuration(md, "readTimeout")
 	if h.md.readTimeout <= 0 {
 		h.md.readTimeout = 15 * time.Second
@@ -48,6 +51,7 @@ func (h *socks5Handler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.noTLS = mdutil.GetBool(md, "notls")
 	h.md.enableBind = mdutil.GetBool(md, "bind")
 	h.md.enableUDP = mdutil.GetBool(md, "udp")
+	h.md.udpBufferSize = mdutil.GetInt(md, "udp.bufferSize", "udpBufferSize")
 
 	h.md.compatibilityMode = mdutil.GetBool(md, "comp")
 	h.md.hash = mdutil.GetString(md, "hash")

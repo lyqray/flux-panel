@@ -1,6 +1,6 @@
 //go:build !linux && !windows && !darwin
 
-package tun
+package tungo
 
 import (
 	"fmt"
@@ -11,7 +11,9 @@ import (
 )
 
 const (
-	defaultTunName = "tun0"
+	defaultTunName = "tungo"
+	readOffset     = 4
+	writeOffset    = 4
 )
 
 func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.IP, err error) {
@@ -26,10 +28,14 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 	if len(l.md.config.Net) > 0 {
 		cmd := fmt.Sprintf("ifconfig %s inet %s mtu %d up",
 			name, l.md.config.Net[0].String(), l.md.config.MTU)
-		l.logger.Debug(cmd)
+		l.log.Debug(cmd)
 
 		args := strings.Split(cmd, " ")
-		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {
+		output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if len(output) > 0 {
+			l.log.Debugf("%s: %s", cmd, string(output))
+		}
+		if er != nil {
 			err = fmt.Errorf("%s: %v", cmd, er)
 			return
 		}
@@ -46,9 +52,13 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 func (l *tunListener) addRoutes(ifName string) error {
 	for _, route := range l.routes {
 		cmd := fmt.Sprintf("route add -net %s -interface %s", route.Net.String(), ifName)
-		l.logger.Debug(cmd)
+		l.log.Debug(cmd)
 		args := strings.Split(cmd, " ")
-		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {
+		output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if len(output) > 0 {
+			l.log.Debugf("%s: %s", cmd, string(output))
+		}
+		if er != nil {
 			return fmt.Errorf("%s: %v", cmd, er)
 		}
 	}

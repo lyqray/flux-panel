@@ -5,16 +5,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"io"
 	"net"
 	"time"
 
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/handler"
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
-	"github.com/go-gost/gosocks5"
-	ctxvalue "github.com/go-gost/x/ctx"
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/utils"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/util/sniffing"
 	"github.com/go-gost/x/internal/util/ss"
@@ -24,7 +26,6 @@ import (
 	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	xrecorder "github.com/go-gost/x/recorder"
 	"github.com/go-gost/x/registry"
-	"github.com/shadowsocks/go-shadowsocks2/core"
 )
 
 func init() {
@@ -32,11 +33,11 @@ func init() {
 }
 
 type ssHandler struct {
-	cipher   core.Cipher
 	md       metadata
 	options  handler.Options
 	recorder recorder.RecorderObject
 	certPool tls_util.CertPool
+	server   core.TCPServer
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -57,9 +58,15 @@ func (h *ssHandler) Init(md md.Metadata) (err error) {
 	if h.options.Auth != nil {
 		method := h.options.Auth.Username()
 		password, _ := h.options.Auth.Password()
-		h.cipher, err = ss.ShadowCipher(method, password, h.md.key)
+
+		serverConfig, err := utils.NewServerConfig(method, password, h.md.users)
 		if err != nil {
-			return
+			return err
+		}
+		h.server = core.NewTCPServer(serverConfig)
+		err = h.server.Init()
+		if err != nil {
+			return err
 		}
 	}
 
@@ -83,27 +90,24 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 	start := time.Now()
 
 	ro := &xrecorder.HandlerRecorderObject{
-		Service:    h.options.Service,
 		Network:    "tcp",
+		Service:    h.options.Service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
+		SID:        xctx.SidFromContext(ctx).String(),
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"network": ro.Network,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -132,46 +136,47 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 		return rate_limiter.ErrRateLimit
 	}
 
-	if h.cipher != nil {
-		conn = ss.ShadowConn(h.cipher.StreamConn(conn), nil)
+	wrappedConn, err := h.server.WrapConn(conn)
+	if err != nil {
+		return
 	}
+	target := wrappedConn.Target()
+	conn = ss.ShadowConn(wrappedConn, nil)
 
 	conn.SetReadDeadline(time.Now().Add(h.md.readTimeout))
 
-	addr := &gosocks5.Addr{}
-	if _, err := addr.ReadFrom(conn); err != nil {
-		log.Error(err)
-		io.Copy(io.Discard, conn)
-		return err
-	}
-	ro.Host = addr.String()
+	ro.Host = target.String()
 
 	conn.SetReadDeadline(time.Time{})
 
 	log = log.WithFields(map[string]any{
-		"dst":  addr.String(),
-		"host": addr.String(),
+		"dst":  target.String(),
+		"host": target.String(),
 	})
 
-	log.Debugf("%s >> %s", conn.RemoteAddr(), addr)
+	log.Debugf("%s >> %s", conn.RemoteAddr(), target)
 
-	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", addr.String()) {
-		log.Debug("bypass: ", addr.String())
+	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, "tcp", target.String(), bypass.WithService(h.options.Service)) {
+		log.Debug("bypass: ", target.String())
 		return nil
 	}
 
 	switch h.md.hash {
 	case "host":
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: addr.String()})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: target.String()})
 	}
 
 	var buf bytes.Buffer
-	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", addr.String())
+	cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "tcp", target.String())
 	ro.Route = buf.String()
 	if err != nil {
 		return err
 	}
 	defer cc.Close()
+
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
 
 	if h.md.sniffing {
 		if h.md.sniffingTimeout > 0 {
@@ -208,14 +213,16 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
-			return sniffer.HandleHTTP(ctx, conn,
+			return sniffer.HandleHTTP(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
 				sniffing.WithLog(log),
 			)
 		case sniffing.ProtoTLS:
-			return sniffer.HandleTLS(ctx, conn,
+			return sniffer.HandleTLS(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
@@ -226,7 +233,8 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), ro.Host)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), ro.Host)

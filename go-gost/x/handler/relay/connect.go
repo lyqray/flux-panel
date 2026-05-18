@@ -6,17 +6,18 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"time"
 
+	"github.com/go-gost/core/bypass"
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/relay"
 	xbypass "github.com/go-gost/x/bypass"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	serial "github.com/go-gost/x/internal/util/serial"
 	"github.com/go-gost/x/internal/util/sniffing"
@@ -33,7 +34,7 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 	}
 
 	log = log.WithFields(map[string]any{
-		"dst":  fmt.Sprintf("%s/%s", address, network),
+		"dst":  address,
 		"cmd":  "connect",
 		"host": address,
 	})
@@ -41,7 +42,7 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 	log.Debugf("%s >> %s/%s", conn.RemoteAddr(), address, network)
 
 	{
-		clientID := ctxvalue.ClientIDFromContext(ctx)
+		clientID := xctx.ClientIDFromContext(ctx)
 		rw := traffic_wrapper.WrapReadWriter(
 			h.limiter,
 			conn,
@@ -77,7 +78,7 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 		return
 	}
 
-	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, network, address) {
+	if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, network, address, bypass.WithService(h.options.Service)) {
 		log.Debug("bypass: ", address)
 		resp.Status = relay.StatusForbidden
 		resp.WriteTo(conn)
@@ -86,7 +87,7 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 
 	switch h.md.hash {
 	case "host":
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: address})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: address})
 	}
 
 	var cc net.Conn
@@ -104,7 +105,7 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 		}
 	default:
 		var buf bytes.Buffer
-		cc, err = h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), network, address)
+		cc, err = h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
 		ro.Route = buf.String()
 	}
 	if err != nil {
@@ -113,6 +114,10 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 		return err
 	}
 	defer cc.Close()
+
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
 
 	if h.md.noDelay {
 		if _, err := resp.WriteTo(conn); err != nil {
@@ -181,14 +186,16 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
-			return sniffer.HandleHTTP(ctx, conn,
+			return sniffer.HandleHTTP(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
 				sniffing.WithLog(log),
 			)
 		case sniffing.ProtoTLS:
-			return sniffer.HandleTLS(ctx, conn,
+			return sniffer.HandleTLS(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
@@ -199,7 +206,8 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), address)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), address)

@@ -176,6 +176,8 @@ func (c *conn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 	if !c.keepalive {
 		defer c.Close()
 	}
+	c.SetIdle(false)
+
 	return c.PacketConn.WriteTo(b, addr)
 }
 

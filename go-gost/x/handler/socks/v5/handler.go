@@ -14,7 +14,7 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/gosocks5"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/internal/util/socks"
 	stats_util "github.com/go-gost/x/internal/util/stats"
 	tls_util "github.com/go-gost/x/internal/util/tls"
@@ -63,6 +63,7 @@ func (h *socks5Handler) Init(md md.Metadata) (err error) {
 	}
 
 	h.selector = &serverSelector{
+		service:       h.options.Service,
 		Authenticator: h.options.Auther,
 		TLSConfig:     h.options.TLSConfig,
 		logger:        h.options.Logger,
@@ -105,27 +106,24 @@ func (h *socks5Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 	start := time.Now()
 
 	ro := &xrecorder.HandlerRecorderObject{
-		Service:    h.options.Service,
 		Network:    "tcp",
+		Service:    h.options.Service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
+		SID:        xctx.SidFromContext(ctx).String(),
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -144,6 +142,7 @@ func (h *socks5Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 		}
 
 		log.WithFields(map[string]any{
+			"network":     ro.Network,
 			"duration":    time.Since(start),
 			"inputBytes":  ro.InputBytes,
 			"outputBytes": ro.OutputBytes,
@@ -165,8 +164,8 @@ func (h *socks5Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 	log.Trace(req)
 
 	if clientID := sc.ID(); clientID != "" {
-		ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(clientID))
-		log = log.WithFields(map[string]any{"user": clientID})
+		ctx = xctx.ContextWithClientID(ctx, xctx.ClientID(clientID))
+		log = log.WithFields(map[string]any{"user": clientID, "clientID": clientID})
 		ro.ClientID = clientID
 	}
 
@@ -180,12 +179,12 @@ func (h *socks5Handler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 	case gosocks5.CmdConnect:
 		return h.handleConnect(ctx, conn, "tcp", address, ro, log)
 	case gosocks5.CmdBind:
-		return h.handleBind(ctx, conn, "tcp", address, log)
+		return h.handleBind(ctx, conn, "tcp", address, ro, log)
 	case socks.CmdMuxBind:
-		return h.handleMuxBind(ctx, conn, "tcp", address, log)
+		return h.handleMuxBind(ctx, conn, "tcp", address, ro, log)
 	case gosocks5.CmdUdp:
 		ro.Network = "udp"
-		return h.handleUDP(ctx, conn, ro, log)
+		return h.handleUDP(ctx, conn, "udp", ro, log)
 	case socks.CmdUDPTun:
 		ro.Network = "udp"
 		return h.handleUDPTun(ctx, conn, "udp", address, ro, log)

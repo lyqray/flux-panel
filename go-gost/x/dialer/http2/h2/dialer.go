@@ -15,6 +15,8 @@ import (
 	"github.com/go-gost/core/dialer"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	xctx "github.com/go-gost/x/ctx"
+	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/registry"
 	"golang.org/x/net/http2"
 )
@@ -94,14 +96,36 @@ func (d *h2Dialer) Dial(ctx context.Context, address string, opts ...dialer.Dial
 			client.Transport = &http2.Transport{
 				AllowHTTP: true,
 				DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-					return options.Dialer.Dial(ctx, network, addr)
+					conn, err := options.Dialer.Dial(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+
+					conn = proxyproto.WrapClientConn(
+						d.options.ProxyProtocol,
+						xctx.SrcAddrFromContext(ctx),
+						xctx.DstAddrFromContext(ctx),
+						conn)
+
+					return conn, nil
 				},
 			}
 		} else {
 			client.Transport = &http.Transport{
 				TLSClientConfig: d.options.TLSConfig,
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return options.Dialer.Dial(ctx, network, addr)
+					conn, err := options.Dialer.Dial(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+
+					conn = proxyproto.WrapClientConn(
+						d.options.ProxyProtocol,
+						xctx.SrcAddrFromContext(ctx),
+						xctx.DstAddrFromContext(ctx),
+						conn)
+
+					return conn, nil
 				},
 				ForceAttemptHTTP2:     true,
 				MaxIdleConns:          100,
@@ -145,7 +169,7 @@ func (d *h2Dialer) Dial(ctx context.Context, address string, opts ...dialer.Dial
 		d.logger.Trace(string(dump))
 	}
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(context.WithoutCancel(ctx)))
 	if err != nil {
 		return nil, err
 	}

@@ -2,58 +2,69 @@ package tun
 
 import (
 	"io"
-	"math"
 
 	"golang.zx2c4.com/wireguard/tun"
 )
 
 const (
-	tunOffsetBytes = 16
-	MaxMessageSize = math.MaxUint16
+	maxBufSize = 16 * 1024
 )
 
 type tunDevice struct {
-	dev   tun.Device
-	elems [][MaxMessageSize]byte
-	rbufs [][]byte
-	wbuf  [tunOffsetBytes + MaxMessageSize]byte
+	dev     tun.Device
+	packets int
+	sizes   []int
+	rbufs   [][]byte
+	wbufs   [][]byte
+	rbuf    []byte
+	wbuf    []byte
 }
 
 func (d *tunDevice) Read(p []byte) (n int, err error) {
-	if len(d.rbufs) > 0 {
-		n = copy(p, d.rbufs[0])
-		d.rbufs = d.rbufs[1:]
-		return
-	}
+	if d.packets > 0 {
+		for i, size := range d.sizes {
+			if size > 0 {
+				n = copy(p, d.rbufs[i][:size])
 
-	sizes := make([]int, len(d.elems))
-	bufs := make([][]byte, len(d.elems))
-	for i := range d.elems {
-		bufs[i] = d.elems[i][:]
-	}
-
-	nn, err := d.dev.Read(bufs, sizes, 0)
-	if err != nil {
-		return
-	}
-
-	for i := 0; i < nn; i++ {
-		if sizes[i] <= 0 {
-			continue
+				d.sizes[i] = 0
+				d.packets--
+				return
+			}
 		}
-		d.rbufs = append(d.rbufs, bufs[i][:sizes[i]])
 	}
 
-	n = copy(p, d.rbufs[0])
-	d.rbufs = d.rbufs[1:]
+	if readOffset > 0 {
+		d.rbufs[0] = d.rbuf
+	} else {
+		d.rbufs[0] = p
+	}
+
+	packets, err := d.dev.Read(d.rbufs, d.sizes, readOffset)
+	if err != nil && err != tun.ErrTooManySegments {
+		return
+	}
+	n = d.sizes[0]
+
+	if readOffset > 0 {
+		copy(p, d.rbuf[readOffset:n+readOffset])
+	}
+
+	d.sizes[0] = 0
+	d.packets = packets - 1
 
 	return
 }
 
 func (d *tunDevice) Write(p []byte) (n int, err error) {
-	buf := d.wbuf[:]
-	n = copy(buf[tunOffsetBytes:], p)
-	_, err = d.dev.Write([][]byte{buf[:tunOffsetBytes+n]}, tunOffsetBytes)
+	if writeOffset > 0 {
+		copy(d.wbuf[writeOffset:], p)
+		d.wbufs[0] = d.wbuf[:writeOffset+len(p)]
+	} else {
+		d.wbufs[0] = p
+	}
+
+	_, err = d.dev.Write(d.wbufs, writeOffset)
+	n = len(p)
 	return
 }
 
@@ -67,9 +78,20 @@ func (l *tunListener) createTunDevice() (dev io.ReadWriteCloser, name string, er
 		return
 	}
 
+	batchSize := ifce.BatchSize()
+
+	rbufs := make([][]byte, batchSize)
+	for i := 1; i < len(rbufs); i++ {
+		rbufs[i] = make([]byte, maxBufSize)
+	}
+
 	dev = &tunDevice{
 		dev:   ifce,
-		elems: make([][MaxMessageSize]byte, ifce.BatchSize()),
+		sizes: make([]int, batchSize),
+		rbufs: rbufs,
+		wbufs: make([][]byte, 1),
+		rbuf:  make([]byte, maxBufSize+readOffset),
+		wbuf:  make([]byte, maxBufSize+writeOffset),
 	}
 	name, err = ifce.Name()
 

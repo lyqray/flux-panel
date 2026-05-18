@@ -14,8 +14,10 @@ import (
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
+	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/internal/util/forwarder"
 	"github.com/go-gost/x/internal/util/sniffing"
 	tls_util "github.com/go-gost/x/internal/util/tls"
@@ -86,18 +88,11 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		LocalAddr:  conn.LocalAddr().String(),
 		Network:    "tcp",
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
+		SID:        xctx.SidFromContext(ctx).String(),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	} else {
-		ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(conn.RemoteAddr().String()))
-	}
-
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	network := "tcp"
@@ -139,8 +134,15 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 
 		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 			var buf bytes.Buffer
-			cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
+			cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "tcp", address)
 			ro.Route = buf.String()
+
+			cc = proxyproto.WrapClientConn(
+				h.md.proxyProtocol,
+				xctx.SrcAddrFromContext(ctx),
+				xctx.DstAddrFromContext(ctx),
+				cc)
+
 			return cc, err
 		}
 		sniffer := &forwarder.Sniffer{
@@ -160,6 +162,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		switch proto {
 		case sniffing.ProtoHTTP:
 			return sniffer.HandleHTTP(ctx, conn,
+				forwarder.WithService(h.options.Service),
 				forwarder.WithDial(dial),
 				forwarder.WithHop(h.hop),
 				forwarder.WithBypass(h.options.Bypass),
@@ -168,6 +171,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 			)
 		case sniffing.ProtoTLS:
 			return sniffer.HandleTLS(ctx, conn,
+				forwarder.WithService(h.options.Service),
 				forwarder.WithDial(dial),
 				forwarder.WithHop(h.hop),
 				forwarder.WithBypass(h.options.Bypass),
@@ -203,7 +207,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	ro.Host = addr
 
 	var buf bytes.Buffer
-	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), network, addr)
+	cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, addr)
 	ro.Route = buf.String()
 	if err != nil {
 		// TODO: the router itself may be failed due to the failed node in the router,
@@ -218,7 +222,14 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}
 	defer cc.Close()
 
-	xnet.Transport(conn, cc)
+	cc = proxyproto.WrapClientConn(
+		h.md.proxyProtocol,
+		xctx.SrcAddrFromContext(ctx),
+		xctx.DstAddrFromContext(ctx),
+		cc)
+
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 
 	return nil
 }

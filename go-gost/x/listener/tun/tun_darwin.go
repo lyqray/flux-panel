@@ -10,6 +10,8 @@ import (
 
 const (
 	defaultTunName = "utun"
+	readOffset     = 4
+	writeOffset    = 4
 )
 
 func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.IP, err error) {
@@ -21,14 +23,14 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 		return
 	}
 
-	peer := l.md.config.Peer
-	if peer == "" {
-		peer = ip.String()
-	}
 	if len(l.md.config.Net) > 0 {
+		peer := l.md.config.Peer
+		if peer == "" {
+			peer = l.md.config.Net[0].IP.String()
+		}
 		cmd := fmt.Sprintf("ifconfig %s inet %s %s mtu %d up",
-			name, l.md.config.Net[0].String(), l.md.config.Peer, l.md.config.MTU)
-		l.logger.Debug(cmd)
+			name, l.md.config.Net[0].String(), peer, l.md.config.MTU)
+		l.log.Debug(cmd)
 		args := strings.Split(cmd, " ")
 		if err = exec.Command(args[0], args[1:]...).Run(); err != nil {
 			return
@@ -46,7 +48,7 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 func (l *tunListener) addRoutes(ifName string) error {
 	for _, route := range l.routes {
 		cmd := fmt.Sprintf("route add -net %s -interface %s", route.Net.String(), ifName)
-		l.logger.Debug(cmd)
+		l.log.Debug(cmd)
 		args := strings.Split(cmd, " ")
 		if err := exec.Command(args[0], args[1:]...).Run(); err != nil {
 			return err

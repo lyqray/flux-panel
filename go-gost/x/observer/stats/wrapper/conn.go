@@ -1,14 +1,16 @@
 package wrapper
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"sync"
 	"syscall"
 
-	"github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
+	"github.com/go-gost/x/ctx"
+	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/udp"
 )
@@ -75,9 +77,23 @@ func (c *conn) SyscallConn() (rc syscall.RawConn, err error) {
 	return
 }
 
-func (c *conn) Metadata() metadata.Metadata {
-	if md, ok := c.Conn.(metadata.Metadatable); ok {
-		return md.Metadata()
+func (c *conn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *conn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *conn) Context() context.Context {
+	if innerCtx, ok := c.Conn.(ctx.Context); ok {
+		return innerCtx.Context()
 	}
 	return nil
 }
@@ -109,9 +125,9 @@ func (c *packetConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	return
 }
 
-func (c *packetConn) Metadata() metadata.Metadata {
-	if md, ok := c.PacketConn.(metadata.Metadatable); ok {
-		return md.Metadata()
+func (c *packetConn) Context() context.Context {
+	if innerCtx, ok := c.PacketConn.(ctx.Context); ok {
+		return innerCtx.Context()
 	}
 	return nil
 }
@@ -252,9 +268,9 @@ func (c *udpConn) SetDSCP(n int) error {
 	return nil
 }
 
-func (c *udpConn) Metadata() metadata.Metadata {
-	if md, ok := c.PacketConn.(metadata.Metadatable); ok {
-		return md.Metadata()
+func (c *udpConn) Context() context.Context {
+	if innerCtx, ok := c.PacketConn.(ctx.Context); ok {
+		return innerCtx.Context()
 	}
 	return nil
 }

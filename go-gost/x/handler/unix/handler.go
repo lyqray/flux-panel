@@ -90,9 +90,11 @@ func (h *unixHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"sid":     ctxvalue.SidFromContext(ctx),
+		"client":  ro.ClientIP,
+		"network": ro.Network,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -174,14 +176,16 @@ func (h *unixHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 		conn = xnet.NewReadWriteConn(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
-			return sniffer.HandleHTTP(ctx, conn,
+			return sniffer.HandleHTTP(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
 				sniffing.WithLog(log),
 			)
 		case sniffing.ProtoTLS:
-			return sniffer.HandleTLS(ctx, conn,
+			return sniffer.HandleTLS(ctx, "tcp", conn,
+				sniffing.WithService(h.options.Service),
 				sniffing.WithDial(dial),
 				sniffing.WithDialTLS(dialTLS),
 				sniffing.WithRecorderObject(ro),
@@ -192,7 +196,8 @@ func (h *unixHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.LocalAddr(), "@")
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.LocalAddr(), "@")
@@ -215,7 +220,7 @@ func (h *unixHandler) forwardUnix(ctx context.Context, conn net.Conn, target *ch
 	}
 	defer cc.Close()
 
-	var rw io.ReadWriter = conn
+	var rw io.ReadWriteCloser = conn
 	if h.md.sniffing {
 		if h.md.sniffingTimeout > 0 {
 			conn.SetReadDeadline(time.Now().Add(h.md.sniffingTimeout))
@@ -229,7 +234,7 @@ func (h *unixHandler) forwardUnix(ctx context.Context, conn net.Conn, target *ch
 			conn.SetReadDeadline(time.Time{})
 		}
 
-		rw = xio.NewReadWriter(br, conn)
+		rw = xio.NewReadWriteCloser(br, conn, conn)
 		switch proto {
 		case sniffing.ProtoHTTP:
 			ro2 := &xrecorder.HandlerRecorderObject{}
@@ -243,7 +248,8 @@ func (h *unixHandler) forwardUnix(ctx context.Context, conn net.Conn, target *ch
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.LocalAddr(), target.Addr)
-	xnet.Transport(rw, cc)
+	// xnet.Transport(rw, cc)
+	xnet.Pipe(ctx, rw, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.LocalAddr(), target.Addr)

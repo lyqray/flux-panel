@@ -5,9 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net"
-	"strconv"
 	"time"
 
 	"github.com/go-gost/core/chain"
@@ -16,7 +14,8 @@ import (
 	mdata "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/internal/util/forwarder"
@@ -89,33 +88,27 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		LocalAddr:  conn.LocalAddr().String(),
 		Network:    "tcp",
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
+		SID:        xctx.SidFromContext(ctx).String(),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	} else {
-		ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(conn.RemoteAddr().String()))
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
-
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
-	}
-
-	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ro.SID,
-		"client": ro.ClientIP,
-	})
-	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
 	network := "tcp"
 	if conn.RemoteAddr().Network() == "udp" {
 		network = "udp"
 	}
 	ro.Network = network
+
+	log := h.options.Logger.WithFields(map[string]any{
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
+	})
+	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
 	pStats := xstats.Stats{}
 	conn = stats_wrapper.WrapConn(conn, &pStats)
@@ -142,13 +135,6 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		return rate_limiter.ErrRateLimit
 	}
 
-	var host string
-	if md, ok := conn.(mdata.Metadatable); ok {
-		if v := mdutil.GetString(md.Metadata(), "host"); v != "" {
-			host = v
-		}
-	}
-
 	var proto string
 	if network == "tcp" && h.md.sniffing {
 		if h.md.sniffingTimeout > 0 {
@@ -165,8 +151,15 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 
 		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 			var buf bytes.Buffer
-			cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
+			cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "tcp", address)
 			ro.Route = buf.String()
+
+			cc = proxyproto.WrapClientConn(
+				h.md.proxyProtocol,
+				xctx.SrcAddrFromContext(ctx),
+				xctx.DstAddrFromContext(ctx),
+				cc)
+
 			return cc, err
 		}
 		sniffer := &forwarder.Sniffer{
@@ -186,6 +179,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		switch proto {
 		case sniffing.ProtoHTTP:
 			return sniffer.HandleHTTP(ctx, conn,
+				forwarder.WithService(h.options.Service),
 				forwarder.WithDial(dial),
 				forwarder.WithHop(h.hop),
 				forwarder.WithBypass(h.options.Bypass),
@@ -195,6 +189,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 			)
 		case sniffing.ProtoTLS:
 			return sniffer.HandleTLS(ctx, conn,
+				forwarder.WithService(h.options.Service),
 				forwarder.WithDial(dial),
 				forwarder.WithHop(h.hop),
 				forwarder.WithBypass(h.options.Bypass),
@@ -205,7 +200,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}
 
 	var target *chain.Node
-	if host != "" {
+	if host := mdutil.GetString(ictx.MetadataFromContext(ctx), "host"); host != "" {
 		target = &chain.Node{
 			Addr: host,
 		}
@@ -233,14 +228,15 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	ro.Host = target.Addr
 
 	log = log.WithFields(map[string]any{
-		"node": target.Name,
-		"dst":  fmt.Sprintf("%s/%s", target.Addr, network),
+		"node":    target.Name,
+		"dst":     target.Addr,
+		"network": network,
 	})
 
 	log.Debugf("%s >> %s", conn.RemoteAddr(), target.Addr)
 
 	var buf bytes.Buffer
-	cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), network, target.Addr)
+	cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, target.Addr)
 	ro.Route = buf.String()
 	if err != nil {
 		log.Error(err)
@@ -256,11 +252,20 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		marker.Reset()
 	}
 
-	cc = proxyproto.WrapClientConn(h.md.proxyProtocol, conn.RemoteAddr(), convertAddr(conn.LocalAddr()), cc)
+	log = log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
+	ro.SrcAddr = cc.LocalAddr().String()
+	ro.DstAddr = cc.RemoteAddr().String()
+
+	cc = proxyproto.WrapClientConn(
+		h.md.proxyProtocol,
+		xctx.SrcAddrFromContext(ctx),
+		xctx.DstAddrFromContext(ctx),
+		cc)
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), target.Addr)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), target.Addr)
@@ -278,28 +283,4 @@ func (h *forwardHandler) checkRateLimit(addr net.Addr) bool {
 	}
 
 	return true
-}
-
-func convertAddr(addr net.Addr) net.Addr {
-	host, sp, _ := net.SplitHostPort(addr.String())
-	ip := net.ParseIP(host)
-	port, _ := strconv.Atoi(sp)
-
-	if ip == nil || ip.Equal(net.IPv6zero) {
-		ip = net.IPv4zero
-	}
-
-	switch addr.Network() {
-	case "tcp", "tcp4", "tcp6":
-		return &net.TCPAddr{
-			IP:   ip,
-			Port: port,
-		}
-
-	default:
-		return &net.UDPAddr{
-			IP:   ip,
-			Port: port,
-		}
-	}
 }

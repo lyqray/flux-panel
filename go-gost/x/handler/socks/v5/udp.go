@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"time"
@@ -14,18 +13,21 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/gosocks5"
 	ctxvalue "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/udp"
 	"github.com/go-gost/x/internal/util/socks"
 	traffic_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
+	metrics "github.com/go-gost/x/metrics/wrapper"
 	xstats "github.com/go-gost/x/observer/stats"
 	stats_wrapper "github.com/go-gost/x/observer/stats/wrapper"
 	xrecorder "github.com/go-gost/x/recorder"
 )
 
-func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, network string, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	log = log.WithFields(map[string]any{
-		"cmd": "udp",
+		"network": network,
+		"cmd":     network,
 	})
 
 	if !h.md.enableUDP {
@@ -38,8 +40,8 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 	lc := xnet.ListenConfig{
 		Netns: h.options.Netns,
 	}
-	laddr := &net.UDPAddr{IP: conn.LocalAddr().(*net.TCPAddr).IP, Port: 0} // use out-going interface's IP
-	cc, err := lc.ListenPacket(ctx, "udp", laddr.String())
+
+	cc, err := lc.ListenPacket(ctx, network, "")
 	if err != nil {
 		log.Error(err)
 		reply := gosocks5.NewReply(gosocks5.Failure, nil)
@@ -49,8 +51,20 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 	}
 	defer cc.Close()
 
+	log = log.WithFields(map[string]any{
+		"src":  cc.LocalAddr().String(),
+		"bind": cc.LocalAddr().String(),
+	})
+	ro.SrcAddr = cc.LocalAddr().String()
+
 	saddr := gosocks5.Addr{}
 	saddr.ParseFrom(cc.LocalAddr().String())
+
+	saddr.Host, _, _ = net.SplitHostPort(conn.LocalAddr().String())
+	if v := net.ParseIP(h.md.publicAddr); v != nil {
+		saddr.Host = h.md.publicAddr
+	}
+	saddr.Type = 0
 	reply := gosocks5.NewReply(gosocks5.Succeeded, &saddr)
 	log.Trace(reply)
 	if err := reply.Write(conn); err != nil {
@@ -58,14 +72,11 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 		return err
 	}
 
-	log = log.WithFields(map[string]any{
-		"bind": fmt.Sprintf("%s/%s", cc.LocalAddr(), cc.LocalAddr().Network()),
-	})
 	log.Debugf("bind on %s OK", cc.LocalAddr())
 
 	// obtain a udp connection
 	var buf bytes.Buffer
-	c, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "udp", "") // UDP association
+	c, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, "") // UDP association
 	ro.Route = buf.String()
 	if err != nil {
 		log.Error(err)
@@ -79,16 +90,17 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 		log.Error(err)
 		return err
 	}
-
-	pStats := xstats.Stats{}
-	cc = stats_wrapper.WrapPacketConn(cc, &pStats)
-
-	defer func() {
-		ro.InputBytes = pStats.Get(stats.KindInputBytes)
-		ro.OutputBytes = pStats.Get(stats.KindOutputBytes)
-	}()
+	pc = metrics.WrapPacketConn(ro.Service, pc)
 
 	{
+		pStats := xstats.Stats{}
+		cc = stats_wrapper.WrapPacketConn(cc, &pStats)
+
+		defer func() {
+			ro.InputBytes = pStats.Get(stats.KindInputBytes)
+			ro.OutputBytes = pStats.Get(stats.KindOutputBytes)
+		}()
+
 		clientID := ctxvalue.ClientIDFromContext(ctx)
 		cc = traffic_wrapper.WrapPacketConn(
 			cc,
@@ -96,7 +108,7 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 			string(clientID),
 			limiter.ServiceOption(h.options.Service),
 			limiter.ScopeOption(limiter.ScopeClient),
-			limiter.NetworkOption("udp"),
+			limiter.NetworkOption(network),
 			limiter.ClientOption(string(clientID)),
 			limiter.SrcOption(conn.RemoteAddr().String()),
 		)
@@ -109,8 +121,15 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 		}
 	}
 
-	r := udp.NewRelay(socks.UDPConn(cc), pc).
+	r := udp.NewRelay(socks.UDPConn(
+		&filteredPacketConn{
+			PacketConn: cc,
+			filterIP:   conn.RemoteAddr().(*net.TCPAddr).IP,
+		},
+		h.md.udpBufferSize), pc).
+		WithService(h.options.Service).
 		WithBypass(h.options.Bypass).
+		WithBufferSize(h.md.udpBufferSize).
 		WithLogger(log)
 
 	go r.Run(ctx)
@@ -122,4 +141,24 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecor
 		Debugf("%s >-< %s", conn.RemoteAddr(), cc.LocalAddr())
 
 	return nil
+}
+
+// filteredPacketConn implements SOCKS5 RFC 1928 UDP relay security by filtering
+// incoming packets to only accept those from the client IP that established the TCP control connection.
+type filteredPacketConn struct {
+	net.PacketConn
+	filterIP net.IP // The expected client IP from the SOCKS5 TCP connection
+}
+
+func (f *filteredPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	for {
+		n, addr, err = f.PacketConn.ReadFrom(p)
+		if err != nil {
+			return
+		}
+
+		if udpAddr := addr.(*net.UDPAddr); udpAddr.IP.Equal(f.filterIP) {
+			return
+		}
+	}
 }

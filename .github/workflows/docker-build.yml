@@ -2,13 +2,15 @@ name: Build and Push Images Based on Version
 
 # 在这里定义统一版本号
 env:
-  VERSION: "1.4.3"
+  VERSION: "1.4.3B"
 
 on:
   push:
     branches:
       - main
       - beta
+  # 支持手动触发 Action
+  workflow_dispatch:
 
 jobs:
   check-version:
@@ -20,7 +22,7 @@ jobs:
       should_build_gost: ${{ steps.check-tag.outputs.should_build_gost }}
       tag_exists: ${{ steps.check-tag.outputs.tag_exists }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -63,18 +65,20 @@ jobs:
   build-gost:
     name: Build & Compress GOST Binary
     needs: check-version
-    if: needs.check-version.outputs.should_build_gost == 'true'
+    if: needs.check-version.outputs.should_build_gost == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.25'
+          # 暂时关闭 setup-go 的内置缓存，改用你下面的手动缓存或直接重新下载，确保环境干净
+          cache: false 
 
       - name: Cache Go modules
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -90,15 +94,31 @@ jobs:
           sudo mv upx-4.2.1-amd64_linux/upx /usr/local/bin/
           rm -rf upx-4.2.1-amd64_linux*
 
+      - name: Prepare Dependencies
+        # 这一步是解决 "updates to go.mod needed" 的关键
+        working-directory: ./go-gost
+        run: |
+          go clean -modcache
+          # 先处理子模块 x
+          cd x && go mod tidy && cd ..
+          # 再处理父模块
+          go mod tidy
+
       - name: Build GOST binary (AMD64)
         working-directory: ./go-gost
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o gost-amd64
+          # 使用 -mod=mod 强制允许在编译时微调依赖哈希
+          # GODEBUG=http2client=0 解决部分旧版 TLS 握手在 Go 1.24 下的限制
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          GODEBUG=http2client=0 \
+          go build -v -mod=mod -ldflags="-s -w" -o gost-amd64 .
 
       - name: Build GOST binary (ARM64)
         working-directory: ./go-gost
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o gost-arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+          GODEBUG=http2client=0 \
+          go build -v -mod=mod -ldflags="-s -w" -o gost-arm64 .
 
       - name: Compress with UPX (AMD64)
         working-directory: ./go-gost
@@ -128,7 +148,7 @@ jobs:
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -150,8 +170,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t bqlpfy/vite-frontend:latest \
-            -t bqlpfy/vite-frontend:${VERSION} \
+            -t lyqray/vite-frontend:latest \
+            -t lyqray/vite-frontend:${VERSION} \
             ./vite-frontend
 
   build-java:
@@ -160,7 +180,7 @@ jobs:
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up JDK and Maven
         uses: actions/setup-java@v3
@@ -169,7 +189,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Cache Maven dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
@@ -194,8 +214,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t bqlpfy/springboot-backend:latest \
-            -t bqlpfy/springboot-backend:${VERSION} \
+            -t lyqray/springboot-backend:latest \
+            -t lyqray/springboot-backend:${VERSION} \
             ./springboot-backend
 
   create-release:
@@ -206,7 +226,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download GOST AMD64 binary
         uses: actions/download-artifact@v4
@@ -257,6 +277,9 @@ jobs:
           
           echo "📤 上传安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
+          gh release upload "${VERSION}" ./install2.sh --clobber
+          gh release upload "${VERSION}" ./install3.sh --clobber
+          gh release upload "${VERSION}" ./install4.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
           
           echo "📤 上传 Docker Compose 配置文件..."
@@ -276,7 +299,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download GOST AMD64 binary
         uses: actions/download-artifact@v4
@@ -317,7 +340,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Update Release Files
         env:
@@ -330,6 +353,9 @@ jobs:
           # 上传安装脚本（覆盖）
           echo "📤 更新安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
+          gh release upload "${VERSION}" ./install2.sh --clobber
+          gh release upload "${VERSION}" ./install3.sh --clobber
+          gh release upload "${VERSION}" ./install4.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
           
           # 上传 Docker Compose 配置文件（覆盖）

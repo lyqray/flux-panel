@@ -8,7 +8,10 @@ import (
 	"github.com/go-gost/core/listener"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
+	xhttp "github.com/go-gost/x/internal/net/http"
 	mdx "github.com/go-gost/x/metadata"
 	"github.com/go-gost/x/registry"
 	"github.com/quic-go/quic-go"
@@ -124,16 +127,30 @@ func (l *http3Listener) Close() (err error) {
 }
 
 func (l *http3Listener) handleFunc(w http.ResponseWriter, r *http.Request) {
-	raddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	if remoteAddr == nil {
+		remoteAddr = &net.TCPAddr{
+			IP: net.IPv4zero,
+		}
+	}
+
+	ctx := r.Context()
+	if clientIP := xhttp.GetClientIP(r); clientIP != nil {
+		ctx = xctx.ContextWithSrcAddr(ctx, &net.UDPAddr{IP: clientIP})
+	}
+
+	ctx = ictx.ContextWithMetadata(ctx, mdx.NewMetadata(map[string]any{
+		"r": r,
+		"w": w,
+	}))
+
 	conn := &conn{
 		laddr:  l.addr,
-		raddr:  raddr,
+		raddr:  remoteAddr,
 		closed: make(chan struct{}),
-		md: mdx.NewMetadata(map[string]any{
-			"r": r,
-			"w": w,
-		}),
+		ctx:    ctx,
 	}
+
 	select {
 	case l.cqueue <- conn:
 	default:

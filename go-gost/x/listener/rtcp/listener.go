@@ -78,11 +78,12 @@ func (l *rtcpListener) Accept() (conn net.Conn, err error) {
 			chain.MuxBindOption(true),
 		)
 		if err != nil {
-			return nil, listener.NewAcceptError(err)
+			return nil, listener.NewBindError(err)
 		}
+
 		ln = metrics.WrapListener(l.options.Service, ln)
 		ln = stats.WrapListener(ln, l.options.Stats)
-		ln = admission.WrapListener(l.options.Admission, ln)
+		ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
 		ln = limiter_wrapper.WrapListener(l.options.Service, ln, l.options.TrafficLimiter)
 		ln = climiter.WrapListener(l.options.ConnLimiter, ln)
 		l.setListener(ln)

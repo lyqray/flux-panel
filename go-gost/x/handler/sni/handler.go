@@ -13,7 +13,8 @@ import (
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/util/sniffing"
 	tls_util "github.com/go-gost/x/internal/util/tls"
@@ -73,27 +74,24 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 	start := time.Now()
 
 	ro := &xrecorder.HandlerRecorderObject{
+		Network:    "tcp",
 		Service:    h.options.Service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
-		Network:    "tcp",
+		SID:        xctx.SidFromContext(ctx).String(),
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
 
@@ -128,14 +126,17 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		var buf bytes.Buffer
-		cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
+		cc, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "tcp", address)
 		ro.Route = buf.String()
+
+		if cc != nil {
+			ro.SrcAddr = cc.LocalAddr().String()
+			ro.DstAddr = cc.RemoteAddr().String()
+		}
 		return cc, err
 	}
 	dialTLS := func(ctx context.Context, network, address string, cfg *tls.Config) (net.Conn, error) {
-		var buf bytes.Buffer
-		cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
-		ro.Route = buf.String()
+		cc, err := dial(ctx, network, address)
 		if err != nil {
 			return nil, err
 		}
@@ -158,7 +159,8 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 	conn = xnet.NewReadWriteConn(br, conn, conn)
 	switch proto {
 	case sniffing.ProtoHTTP:
-		return sniffer.HandleHTTP(ctx, conn,
+		return sniffer.HandleHTTP(ctx, "tcp", conn,
+			sniffing.WithService(h.options.Service),
 			sniffing.WithDial(dial),
 			sniffing.WithDialTLS(dialTLS),
 			sniffing.WithBypass(h.options.Bypass),
@@ -166,7 +168,8 @@ func (h *sniHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 			sniffing.WithLog(log),
 		)
 	case sniffing.ProtoTLS:
-		return sniffer.HandleTLS(ctx, conn,
+		return sniffer.HandleTLS(ctx, "tcp", conn,
+			sniffing.WithService(h.options.Service),
 			sniffing.WithDial(dial),
 			sniffing.WithDialTLS(dialTLS),
 			sniffing.WithBypass(h.options.Bypass),

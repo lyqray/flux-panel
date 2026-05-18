@@ -10,6 +10,11 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+const (
+	readOffset  = 0
+	writeOffset = 16
+)
+
 func (l *tunListener) createTun() (dev io.ReadWriteCloser, name string, ip net.IP, err error) {
 	dev, name, err = l.createTunDevice()
 	if err != nil {
@@ -30,7 +35,7 @@ func (l *tunListener) createTun() (dev io.ReadWriteCloser, name string, ip net.I
 		if err = netlink.AddrAdd(link, &netlink.Addr{
 			IPNet: &net,
 		}); err != nil {
-			l.logger.Error(err)
+			l.log.Error(err)
 			continue
 		}
 	}
@@ -52,7 +57,7 @@ func (l *tunListener) createTun() (dev io.ReadWriteCloser, name string, ip net.I
 	}
 	if len(dnsServers) > 0 {
 		cmd := fmt.Sprintf("resolvectl dns %s %s", name, strings.Join(dnsServers, " "))
-		l.logger.Debug(cmd)
+		l.log.Debug(cmd)
 
 		args := strings.Split(cmd, " ")
 		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {

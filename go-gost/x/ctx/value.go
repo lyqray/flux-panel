@@ -1,111 +1,92 @@
 package ctx
 
 import (
-	"bytes"
 	"context"
-
-	"github.com/go-gost/core/logger"
+	"net"
 )
 
-// clientAddrKey saves the client address.
-type clientAddrKey struct{}
-
-type ClientAddr string
-
-var (
-	keyClientAddr clientAddrKey
-)
-
-func ContextWithClientAddr(ctx context.Context, addr ClientAddr) context.Context {
-	return context.WithValue(ctx, keyClientAddr, addr)
+type Context interface {
+	Context() context.Context
 }
 
-func ClientAddrFromContext(ctx context.Context) ClientAddr {
-	v, _ := ctx.Value(keyClientAddr).(ClientAddr)
+type WithContext interface {
+	WithContext(ctx context.Context)
+}
+
+type srcAddrKey struct{}
+
+func ContextWithSrcAddr(ctx context.Context, addr net.Addr) context.Context {
+	return context.WithValue(ctx, srcAddrKey{}, addr)
+}
+
+func SrcAddrFromContext(ctx context.Context) net.Addr {
+	v, _ := ctx.Value(srcAddrKey{}).(net.Addr)
 	return v
 }
 
-// sidKey saves the session ID.
-type sidKey struct{}
-type Sid string
+type dstAddrKey struct{}
 
-var (
-	keySid sidKey
+func ContextWithDstAddr(ctx context.Context, addr net.Addr) context.Context {
+	return context.WithValue(ctx, dstAddrKey{}, addr)
+}
+
+func DstAddrFromContext(ctx context.Context) net.Addr {
+	v, _ := ctx.Value(dstAddrKey{}).(net.Addr)
+	return v
+}
+
+type (
+	Sid string
+	// sidKey saves the session ID.
+	sidKey struct{}
 )
 
+func (s Sid) String() string {
+	return string(s)
+}
+
 func ContextWithSid(ctx context.Context, sid Sid) context.Context {
-	return context.WithValue(ctx, keySid, sid)
+	return context.WithValue(ctx, sidKey{}, sid)
 }
 
 func SidFromContext(ctx context.Context) Sid {
-	v, _ := ctx.Value(keySid).(Sid)
+	v, _ := ctx.Value(sidKey{}).(Sid)
 	return v
 }
 
-// hashKey saves the hash source for Selector.
-type hashKey struct{}
-
-type Hash struct {
-	Source string
-}
-
-var (
-	clientHashKey = &hashKey{}
+type (
+	// hashKey saves the hash source for Selector.
+	hashKey struct{}
+	Hash    struct {
+		Source string
+	}
 )
 
 func ContextWithHash(ctx context.Context, hash *Hash) context.Context {
-	return context.WithValue(ctx, clientHashKey, hash)
+	return context.WithValue(ctx, hashKey{}, hash)
 }
 
 func HashFromContext(ctx context.Context) *Hash {
-	if v, _ := ctx.Value(clientHashKey).(*Hash); v != nil {
+	if v, _ := ctx.Value(hashKey{}).(*Hash); v != nil {
 		return v
 	}
 	return nil
 }
 
-type clientIDKey struct{}
-type ClientID string
-
-var (
-	keyClientID = &clientIDKey{}
+type (
+	ClientID    string
+	clientIDKey struct{}
 )
 
+func (s ClientID) String() string {
+	return string(s)
+}
+
 func ContextWithClientID(ctx context.Context, clientID ClientID) context.Context {
-	return context.WithValue(ctx, keyClientID, clientID)
+	return context.WithValue(ctx, clientIDKey{}, clientID)
 }
 
 func ClientIDFromContext(ctx context.Context) ClientID {
-	v, _ := ctx.Value(keyClientID).(ClientID)
-	return v
-}
-
-type bufferKey struct{}
-
-var (
-	keyBuffer = &bufferKey{}
-)
-
-func ContextWithBuffer(ctx context.Context, buffer *bytes.Buffer) context.Context {
-	return context.WithValue(ctx, keyBuffer, buffer)
-}
-
-func BufferFromContext(ctx context.Context) *bytes.Buffer {
-	v, _ := ctx.Value(keyBuffer).(*bytes.Buffer)
-	return v
-}
-
-type loggerKey struct{}
-
-var (
-	keyLogger = &loggerKey{}
-)
-
-func ContextWithLogger(ctx context.Context, log logger.Logger) context.Context {
-	return context.WithValue(ctx, keyLogger, log)
-}
-
-func LoggerFromContext(ctx context.Context) logger.Logger {
-	v, _ := ctx.Value(keyLogger).(logger.Logger)
+	v, _ := ctx.Value(clientIDKey{}).(ClientID)
 	return v
 }

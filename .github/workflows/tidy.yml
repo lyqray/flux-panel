@@ -1,0 +1,51 @@
+name: Go Mod Tidy
+
+on:
+  push:
+    paths:
+      - "go-gost/go.mod"
+      - "go-gost/x/go.mod"
+  workflow_dispatch:
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          # 修复警告：明确告诉 Action 去哪里找依赖文件以进行缓存管理
+          cache-dependency-path: |
+            go-gost/go.sum
+            go-gost/x/go.sum
+
+      - name: Run go mod tidy
+        run: |
+          # 1. 彻底清理缓存，防止之前的错误尝试残留
+          go clean -modcache
+
+          # 2. 处理子模块 x
+          echo "Processing go-gost/x..."
+          cd go-gost/x
+          # 关键点：物理删除旧的 go.sum，强制 Go 根据最新的 replace 重新生成
+          rm -f go.sum
+          go mod tidy
+          
+          # 3. 返回并处理父模块
+          echo "Processing go-gost..."
+          cd ..
+          # 同样删除父模块的 go.sum
+          rm -f go.sum
+          go mod tidy
+
+      - name: Commit and Push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: automated go mod tidy"
+          file_pattern: "go-gost/go.sum go-gost/x/go.sum"

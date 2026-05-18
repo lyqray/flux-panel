@@ -12,7 +12,10 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	admission "github.com/go-gost/x/admission/wrapper"
+	xctx "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
+	xhttp "github.com/go-gost/x/internal/net/http"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -32,7 +35,7 @@ type http2Listener struct {
 	addr    net.Addr
 	cqueue  chan net.Conn
 	errChan chan error
-	logger  logger.Logger
+	log     logger.Logger
 	md      metadata
 	options listener.Options
 }
@@ -43,7 +46,7 @@ func NewListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &http2Listener{
-		logger:  options.Logger,
+		log:     options.Logger,
 		options: options,
 	}
 }
@@ -57,6 +60,21 @@ func (l *http2Listener) Init(md md.Metadata) (err error) {
 		Addr:      l.options.Addr,
 		Handler:   http.HandlerFunc(l.handleFunc),
 		TLSConfig: l.options.TLSConfig,
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if tlsConn, ok := c.(*tls.Conn); ok {
+				if cc, ok := tlsConn.NetConn().(xctx.Context); ok {
+					if cv := cc.Context(); cv != nil {
+						return cv
+					}
+				}
+			}
+			if cc, ok := c.(xctx.Context); ok {
+				if cv := cc.Context(); cv != nil {
+					return cv
+				}
+			}
+			return ctx
+		},
 	}
 	if err := http2.ConfigureServer(l.server, nil); err != nil {
 		return err
@@ -69,7 +87,7 @@ func (l *http2Listener) Init(md md.Metadata) (err error) {
 	lc := net.ListenConfig{}
 	if l.md.mptcp {
 		lc.SetMultipathTCP(true)
-		l.logger.Debugf("mptcp enabled: %v", lc.MultipathTCP())
+		l.log.Debugf("mptcp enabled: %v", lc.MultipathTCP())
 	}
 	ln, err := lc.Listen(context.Background(), network, l.options.Addr)
 	if err != nil {
@@ -79,10 +97,9 @@ func (l *http2Listener) Init(md md.Metadata) (err error) {
 	ln = proxyproto.WrapListener(l.options.ProxyProtocol, ln, 10*time.Second)
 	ln = metrics.WrapListener(l.options.Service, ln)
 	ln = stats.WrapListener(ln, l.options.Stats)
-	ln = admission.WrapListener(l.options.Admission, ln)
+	ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
 	ln = limiter_wrapper.WrapListener(l.options.Service, ln, l.options.TrafficLimiter)
 	ln = climiter.WrapListener(l.options.ConnLimiter, ln)
-
 	ln = tls.NewListener(
 		ln,
 		l.options.TLSConfig,
@@ -93,7 +110,7 @@ func (l *http2Listener) Init(md md.Metadata) (err error) {
 
 	go func() {
 		if err := l.server.Serve(ln); err != nil {
-			l.logger.Error(err)
+			l.log.Error(err)
 		}
 	}()
 
@@ -138,22 +155,39 @@ func (l *http2Listener) Close() (err error) {
 }
 
 func (l *http2Listener) handleFunc(w http.ResponseWriter, r *http.Request) {
-	raddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	if remoteAddr == nil {
+		remoteAddr = &net.TCPAddr{
+			IP: net.IPv4zero,
+		}
+	}
+
+	ctx := r.Context()
+	if clientIP := xhttp.GetClientIP(r); clientIP != nil {
+		ctx = xctx.ContextWithSrcAddr(ctx, &net.TCPAddr{IP: clientIP})
+	}
+
+	ctx = ictx.ContextWithMetadata(ctx, mdx.NewMetadata(map[string]any{
+		"r": r,
+		"w": w,
+	}))
+
+	ctx, cancel := context.WithCancel(ctx)
 	conn := &conn{
 		laddr:  l.addr,
-		raddr:  raddr,
+		raddr:  remoteAddr,
+		ctx:    ctx,
+		cancel: cancel,
 		closed: make(chan struct{}),
-		md: mdx.NewMetadata(map[string]any{
-			"r": r,
-			"w": w,
-		}),
 	}
+
 	select {
 	case l.cqueue <- conn:
 	default:
-		l.logger.Warnf("connection queue is full, client %s discarded", r.RemoteAddr)
+		l.log.Warnf("connection queue is full, client %s discarded", r.RemoteAddr)
 		return
 	}
 
-	<-conn.Done()
+	// NOTE: we need to wait for conn closed, or the connection will be closed.
+	<-conn.closed
 }

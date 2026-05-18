@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/go-gost/core/logger"
-	ctxvalue "github.com/go-gost/x/ctx"
+	ictx "github.com/go-gost/x/internal/ctx"
 	"github.com/go-gost/x/internal/net/udp"
 	"github.com/go-gost/x/internal/util/socks"
 	xrecorder "github.com/go-gost/x/recorder"
@@ -55,13 +55,16 @@ func (h *httpHandler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecorde
 
 	// obtain a udp connection
 	var buf bytes.Buffer
-	c, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "udp", "") // UDP association
+	c, err := h.options.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "udp", "") // UDP association
 	ro.Route = buf.String()
 	if err != nil {
 		log.Error(err)
 		return err
 	}
 	defer c.Close()
+
+	log.WithFields(map[string]any{"src": c.LocalAddr().String()})
+	ro.SrcAddr = c.LocalAddr().String()
 
 	pc, ok := c.(net.PacketConn)
 	if !ok {
@@ -71,7 +74,9 @@ func (h *httpHandler) handleUDP(ctx context.Context, conn net.Conn, ro *xrecorde
 	}
 
 	relay := udp.NewRelay(socks.UDPTunServerConn(conn), pc).
+		WithService(h.options.Service).
 		WithBypass(h.options.Bypass).
+		WithBufferSize(h.md.udpBufferSize).
 		WithLogger(log)
 
 	t := time.Now()

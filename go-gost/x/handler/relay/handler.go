@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/handler"
 	"github.com/go-gost/core/hop"
 	"github.com/go-gost/core/limiter"
@@ -16,7 +17,7 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/relay"
-	ctxvalue "github.com/go-gost/x/ctx"
+	xctx "github.com/go-gost/x/ctx"
 	stats_util "github.com/go-gost/x/internal/util/stats"
 	tls_util "github.com/go-gost/x/internal/util/tls"
 	rate_limiter "github.com/go-gost/x/limiter/rate"
@@ -105,26 +106,24 @@ func (h *relayHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 	start := time.Now()
 
 	ro := &xrecorder.HandlerRecorderObject{
+		Network:    "tcp",
 		Service:    h.options.Service,
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
+		SID:        xctx.SidFromContext(ctx).String(),
 		Time:       start,
-		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := xctx.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientAddr = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
-		"remote": conn.RemoteAddr().String(),
-		"local":  conn.LocalAddr().String(),
-		"sid":    ctxvalue.SidFromContext(ctx),
-		"client": ro.ClientIP,
+		"network": ro.Network,
+		"remote":  conn.RemoteAddr().String(),
+		"local":   conn.LocalAddr().String(),
+		"client":  ro.ClientAddr,
+		"sid":     ro.SID,
 	})
 
 	log.Infof("%s <> %s", conn.RemoteAddr(), conn.LocalAddr())
@@ -202,13 +201,15 @@ func (h *relayHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 	}
 
 	if h.options.Auther != nil {
-		clientID, ok := h.options.Auther.Authenticate(ctx, user, pass)
+		clientID, ok := h.options.Auther.Authenticate(ctx, user, pass, auth.WithService(h.options.Service))
 		if !ok {
 			resp.Status = relay.StatusUnauthorized
 			resp.WriteTo(conn)
 			return ErrUnauthorized
 		}
-		ctx = ctxvalue.ContextWithClientID(ctx, ctxvalue.ClientID(clientID))
+		log = log.WithFields(map[string]any{"clientID": clientID})
+		ro.ClientID = clientID
+		ctx = xctx.ContextWithClientID(ctx, xctx.ClientID(clientID))
 	}
 
 	network := networkID.String()
@@ -217,17 +218,18 @@ func (h *relayHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 	}
 	ro.Network = network
 	ro.Host = address
+	log = log.WithFields(map[string]any{"network": network})
 
 	if h.hop != nil {
 		// forward mode
-		return h.handleForward(ctx, conn, network, log)
+		return h.handleForward(ctx, conn, network, ro, log)
 	}
 
 	switch req.Cmd & relay.CmdMask {
 	case 0, relay.CmdConnect:
 		return h.handleConnect(ctx, conn, network, address, ro, log)
 	case relay.CmdBind:
-		return h.handleBind(ctx, conn, network, address, log)
+		return h.handleBind(ctx, conn, network, address, ro, log)
 	default:
 		resp.Status = relay.StatusBadRequest
 		resp.WriteTo(conn)
