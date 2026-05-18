@@ -35,7 +35,7 @@ get_architecture() {
 # 构建下载地址
 build_download_url() {
     local ARCH=$(get_architecture)
-    echo "https://github.com/lyqray/flux-panel/releases/download/1.4.3B/gost-${ARCH}"
+    echo "https://github.com/lyqray/flux-panel/releases/download/1.4.3C/gost-${ARCH}"
 }
 
 DOWNLOAD_URL=$(build_download_url)

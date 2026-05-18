@@ -37,4 +37,9 @@ public class ForwardUpdateDto {
 
     @TableField(updateStrategy = FieldStrategy.IGNORED)
     private String interfaceName;
+
+    /**
+     * 是否启用代理协议（0: 禁用, 1: 启用）
+     */
+    private Integer proxyProtocol = 0; // 设置默认值为0（禁用）
 } 

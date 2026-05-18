@@ -8,9 +8,9 @@ export LC_ALL=C
 
 
 # 全局下载地址配置
-DOCKER_COMPOSEV4_URL="https://github.com/lyqray/flux-panel/releases/download/1.4.3B/docker-compose-v4.yml"
-DOCKER_COMPOSEV6_URL="https://github.com/lyqray/flux-panel/releases/download/1.4.3B/docker-compose-v6.yml"
-GOST_SQL_URL="https://github.com/lyqray/flux-panel/releases/download/1.4.3B/gost.sql"
+DOCKER_COMPOSEV4_URL="https://github.com/lyqray/flux-panel/releases/download/1.4.3C/docker-compose-v4.yml"
+DOCKER_COMPOSEV6_URL="https://github.com/lyqray/flux-panel/releases/download/1.4.3C/docker-compose-v6.yml"
+GOST_SQL_URL="https://github.com/lyqray/flux-panel/releases/download/1.4.3C/gost.sql"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
@@ -899,10 +899,33 @@ PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
+-- forward 表：添加 proxy_protocol 字段
+SET @sql = (
+  SELECT IF(
+    NOT EXISTS (
+      SELECT 1
+      FROM information_schema.COLUMNS
+      WHERE table_schema = DATABASE()
+        AND table_name = 'forward'
+        AND column_name = 'proxy_protocol'
+    ),
+    'ALTER TABLE \`forward\` ADD COLUMN \`proxy_protocol\` INT(10) NOT NULL DEFAULT 0 COMMENT "Proxy Protocol 支持";',
+    'SELECT "Column \`proxy_protocol\` already exists in \`forward\`";'
+  )
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
 -- 为现有记录设置当前毫秒时间戳（仅当 created_time 为 0 或 NULL 时）
 UPDATE \`statistics_flow\`
 SET \`created_time\` = UNIX_TIMESTAMP() * 1000
 WHERE \`created_time\` = 0 OR \`created_time\` IS NULL;
+
+-- 为现有数据设置默认 proxy_protocol 值
+UPDATE \`forward\`
+SET \`proxy_protocol\` = 0
+WHERE \`proxy_protocol\` IS NULL;
 
 EOF
 
